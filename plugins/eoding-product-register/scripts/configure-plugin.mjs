@@ -1,0 +1,23 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { homedir } from 'node:os';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+
+const root = fileURLToPath(new URL('../', import.meta.url));
+const args = process.argv.slice(2);
+if (args.length && (args.length !== 2 || args[0] !== '--data-dir')) throw new Error('Usage: node scripts/configure-plugin.mjs [--data-dir ABSOLUTE_PRIVATE_DIRECTORY]');
+const dataDir = path.resolve(args[1] || path.join(homedir(), '.eoding-product-importer-plugin'));
+if (dataDir === path.parse(dataDir).root || dataDir === homedir() || dataDir === path.resolve(root) || dataDir.startsWith('\\\\')) throw new Error('Choose a dedicated local data directory');
+const inputDir = path.join(dataDir, 'input');
+const output = path.join(dataDir, 'connections');
+await mkdir(inputDir, { recursive: true });
+await mkdir(output, { recursive: true });
+const python = path.join(dataDir, 'python', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+const entry = { command: process.execPath, args: [path.join(root, 'scripts', 'plugin-start.mjs')], env: { EODING_DATA_DIR: dataDir, EODING_INPUT_DIR: inputDir, ...(existsSync(python) ? { EODING_PYTHON: python } : {}) } };
+const json = value => JSON.stringify(value, null, 2) + '\n';
+await writeFile(path.join(output, 'mcp-generic.json'), json({ mcpServers: { 'eoding-product-register': entry } }));
+await writeFile(path.join(output, 'mcp-vscode.json'), json({ servers: { 'eoding-product-register': { type: 'stdio', ...entry } } }));
+const quote = value => JSON.stringify(value);
+await writeFile(path.join(output, 'codex.toml'), '[mcp_servers.eoding-product-register]\nstartup_timeout_sec = 300\ncommand = ' + quote(entry.command) + '\nargs = [' + entry.args.map(quote).join(', ') + ']\n\n[mcp_servers.eoding-product-register.env]\n' + Object.entries(entry.env).map(([key, value]) => key + ' = ' + quote(value)).join('\n') + '\n');
+console.log(JSON.stringify({ status: 'connection-files-created', output, inputDir, automaticHostConfiguration: false }, null, 2));

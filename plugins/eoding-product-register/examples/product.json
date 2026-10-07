@@ -1,0 +1,145 @@
+{
+  "schemaVersion": "1.0",
+  "sources": [
+    {
+      "id": "sample",
+      "kind": "text",
+      "reference": "Synthetic fixture, not a real offer",
+      "capturedAt": "2026-09-18T00:00:00Z"
+    }
+  ],
+  "externalCode": "DEMO-NOT-FOR-SALE-001",
+  "title": "[가상 테스트] 제주 2일",
+  "destinations": [
+    "대한민국",
+    "제주"
+  ],
+  "tripType": "domestic",
+  "includesFlight": false,
+  "currency": "KRW",
+  "nights": 1,
+  "days": 2,
+  "hotels": [
+    {
+      "name": "가상호텔",
+      "status": "planned"
+    }
+  ],
+  "itinerary": [
+    {
+      "day": 1,
+      "title": "첫째 날",
+      "description": "가상 관광 일정",
+      "meals": {
+        "breakfast": "불포함",
+        "lunch": "포함",
+        "dinner": "포함"
+      }
+    },
+    {
+      "day": 2,
+      "title": "둘째 날",
+      "description": "가상 자유시간 후 귀가",
+      "meals": {
+        "breakfast": "포함",
+        "lunch": "불포함",
+        "dinner": "불포함"
+      }
+    }
+  ],
+  "includes": [
+    "숙박 1박"
+  ],
+  "excludes": [
+    "개인 경비"
+  ],
+  "cancellation": "가상 데이터입니다. 실제 판매에 사용하지 마세요.",
+  "departures": [
+    {
+      "startDate": "2027-01-10",
+      "endDate": "2027-01-11",
+      "prices": [
+        {
+          "adult": {
+            "currency": "KRW",
+            "amount": 100000
+          },
+          "basis": "standard",
+          "conditions": "가상 요금"
+        }
+      ],
+      "selectedPrice": 0,
+      "flights": []
+    }
+  ],
+  "company": {
+    "tenant": "TEST-TENANT-NOT-REAL",
+    "manager": "가상담당자",
+    "city": "제주",
+    "departurePoint": "현지합류",
+    "vat": "included"
+  },
+  "evidence": [
+    {
+      "field": "title",
+      "sourceId": "sample",
+      "location": "synthetic fixture title",
+      "quote": "명시적인 가상 테스트 데이터"
+    },
+    {
+      "field": "destinations",
+      "sourceId": "sample",
+      "location": "synthetic fixture destinations",
+      "quote": "명시적인 가상 테스트 데이터"
+    },
+    {
+      "field": "tripType",
+      "sourceId": "sample",
+      "location": "synthetic fixture tripType",
+      "quote": "명시적인 가상 테스트 데이터"
+    },
+    {
+      "field": "includesFlight",
+      "sourceId": "sample",
+      "location": "synthetic fixture includesFlight",
+      "quote": "명시적인 가상 테스트 데이터"
+    },
+    {
+      "field": "currency",
+      "sourceId": "sample",
+      "location": "synthetic fixture currency",
+      "quote": "명시적인 가상 테스트 데이터"
+    },
+    {
+      "field": "nights",
+      "sourceId": "sample",
+      "location": "synthetic fixture nights",
+      "quote": "명시적인 가상 테스트 데이터"
+    },
+    {
+      "field": "days",
+      "sourceId": "sample",
+      "location": "synthetic fixture days",
+      "quote": "명시적인 가상 테스트 데이터"
+    },
+    {
+      "field": "itinerary",
+      "sourceId": "sample",
+      "location": "synthetic fixture itinerary",
+      "quote": "명시적인 가상 테스트 데이터"
+    },
+    {
+      "field": "cancellation",
+      "sourceId": "sample",
+      "location": "synthetic fixture cancellation",
+      "quote": "명시적인 가상 테스트 데이터"
+    },
+    {
+      "field": "departures",
+      "sourceId": "sample",
+      "location": "synthetic fixture departures",
+      "quote": "명시적인 가상 테스트 데이터"
+    }
+  ],
+  "unresolved": []
+}

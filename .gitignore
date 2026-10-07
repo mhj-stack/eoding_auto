@@ -1,0 +1,14 @@
+node_modules/
+.venv/
+.local/
+.env
+.env.*
+*.log
+__pycache__/
+.DS_Store
+dist/
+*.zip
+python/
+runtimes/
+profiles/
+evidence/

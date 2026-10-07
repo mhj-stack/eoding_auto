@@ -1,0 +1,63 @@
+# 어딩 상품등록기
+
+상품 링크·엑셀·상품 원문을 AI에게 전달하면 내용을 정리하고, 한 번의 검토를 거쳐 어딩 ERP에 **신규 비공개 상품**을 등록하는 플러그인입니다. 연결한 AI가 자료를 해석하므로 별도 LLM API 키는 필요하지 않습니다.
+
+## Codex에 설치
+
+먼저 **Node.js 22 이상(npm 포함), Python 3.10 이상, Git**을 설치합니다. Windows에서는 Python을 PATH에 추가하고 Codex를 다시 실행합니다.
+
+```bash
+codex plugin marketplace add mhj-stack/eoding_auto
+codex plugin add eoding-product-register@eoding-auto
+```
+
+설치 후 새 대화를 시작합니다. 앱에서 설치하려면 첫 번째 명령으로 배포처를 추가한 뒤 플러그인 목록의 **어딩 자동화**에서 `eoding-product-register`를 설치해도 됩니다.
+
+첫 연결 때 잠금 파일에 지정된 Node 패키지, Chromium, 별도 Python 환경을 개인 데이터 폴더에 자동 준비합니다. 인터넷 연결이 필요하며 몇 분 걸릴 수 있습니다. MCP 연결 시간이 초과되면 설치가 끝난 뒤 플러그인을 다시 연결합니다. 미리 준비하려면 아래 수동 설치 방식을 사용합니다. 이후에는 같은 버전의 실행 환경을 재사용합니다.
+
+## 사용
+
+AI에게 상품 자료와 함께 다음처럼 요청합니다.
+
+> 이 링크의 상품을 어딩에 비공개로 등록해줘. 시즌은 제외하고, 이미지와 전체 일정을 넣어줘.
+
+1. AI가 원문을 읽고 필요한 정보를 묶어서 질문합니다.
+2. 전용 브라우저가 열리면 사용자가 ERP에 직접 로그인합니다.
+3. 검토 화면에서 내용을 확인하고 한 번 승인합니다.
+4. AI가 저장된 상품 링크와 최종 확인 결과를 알려줍니다.
+
+지원 범위는 기본정보, 전시 이미지, 상세·포함/불포함·참조정보, 일정표와 전체 일차·식사입니다. 시즌·가격·항공 매핑은 요청에 포함하고 필요한 정보를 제공한 경우 처리합니다. 행사 생성·호텔 배정·기존 상품 수정·판매 공개는 지원 범위에 포함되지 않습니다.
+
+## 다른 AI 또는 수동 설치
+
+로컬 stdio MCP를 지원하는 AI에서 사용할 수 있습니다. 웹 전용 AI에 직접 연결하는 원격 서버는 포함되어 있지 않습니다.
+
+```bash
+git clone https://github.com/mhj-stack/eoding_auto.git
+cd eoding_auto/plugins/eoding-product-register
+node scripts/plugin-start.mjs --setup-only
+node scripts/configure-plugin.mjs
+```
+
+Windows에서는 해당 폴더의 `Install.cmd`를 실행해도 됩니다. 생성된 `connections` 폴더의 `mcp-generic.json`, `mcp-vscode.json`, `codex.toml` 중 사용하는 AI의 형식을 연결합니다. 기존 AI 설정은 자동으로 덮어쓰지 않습니다. 스킬을 지원하면 `skills/eoding-product-register`도 연결합니다.
+
+Python이 PATH에 없다면 `EODING_PYTHON`에 Python 실행 파일의 절대경로를 지정합니다. 설치되는 Python 라이브러리는 전용 가상환경에만 보관됩니다. Linux에서 Chromium 시스템 라이브러리가 부족하면 Playwright 안내에 따라 운영체제 의존성을 먼저 설치해야 합니다.
+
+## 업데이트
+
+```bash
+codex plugin marketplace upgrade eoding-auto
+codex plugin add eoding-product-register@eoding-auto
+```
+
+이후 새 대화를 시작합니다. 실행 중인 등록이 끝난 뒤 업데이트하세요. 플러그인 버전이 바뀌면 새 실행 환경을 준비하며 이전 상품 작업 기록을 지우지 않습니다.
+
+## 데이터와 검증
+
+로그인 프로필·쿠키·원문·작업 기록은 개인 데이터 폴더에 저장됩니다. Codex 플러그인은 호스트의 `PLUGIN_DATA`, 수동 연결은 기본적으로 사용자 홈의 `.eoding-product-importer-plugin`을 사용합니다. **두 연결 방식은 기본 데이터 위치가 다릅니다.** 같은 작업을 이어가려면 기존 연결을 닫고 같은 `EODING_DATA_DIR`를 지정해야 합니다.
+
+엑셀과 로컬 이미지는 `product_import_capabilities`가 알려주는 `inputDir`에 넣습니다. `runtimes` 폴더는 재설치 가능한 실행 환경이고, 그 밖의 프로필·작업 기록은 업무 데이터입니다. 이 저장소에는 실제 상품자료·쿠키·브라우저 프로필을 포함하지 않습니다.
+
+자동 테스트는 격리된 가상 ERP 화면에서 검증합니다. 실제 ERP 계정에서 한 건을 완주하는 운영 검증은 아직 완료하지 않았습니다. 특정 AI 앱의 모든 버전이나 모든 ERP 화면 변형을 보장하지 않습니다. [검증 범위](plugins/eoding-product-register/docs/plugin-verification.md)
+
+설치 구조는 [OpenAI 공식 플러그인 문서](https://developers.openai.com/plugins/build/plugins)를 따릅니다. MIT 라이선스입니다.

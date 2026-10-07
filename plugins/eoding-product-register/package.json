@@ -1,0 +1,21 @@
+{
+  "name": "eoding-product-register",
+  "version": "0.1.1",
+  "private": true,
+  "type": "module",
+  "description": "Local MCP/CLI travel evidence reader and human-approved private basic-product browser importer for Eoding.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node scripts/plugin-start.mjs",
+    "setup": "node scripts/plugin-start.mjs --setup-only",
+    "configure": "node scripts/configure-plugin.mjs",
+    "test": "node --test --test-concurrency=1 tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "playwright": "^1.58.0",
+    "zod": "^3.25.0"
+  }
+}
