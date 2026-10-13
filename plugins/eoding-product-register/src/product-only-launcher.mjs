@@ -12,6 +12,9 @@ import { createProductOnlyAdapters } from './product-only-adapters.mjs';
 import { createProductLowLevelAdapters } from './product-execution.mjs';
 import { ProductOnlyReviewStore, startProductOnlyReviewUI } from './product-only-review.mjs';
 import { ScheduleSessionBrowser } from './schedule-session.mjs';
+import { flightPreflight } from './plugin-workflow.mjs';
+import { departurePreflight } from './plugin-departure.mjs';
+import { installStageTransport } from './stage-transport.mjs';
 
 const MAX_IMAGE_BYTES = 2_000_000;
 const MAX_CDN_BYTES = 2_100_000;
@@ -85,7 +88,9 @@ function validateSeasonCommercialBinding(plan) {
   for (const key of REQUIRED_FLIGHT_FIELD_KEYS) text(fields[key], `season.fields.${key}`);
   if (!plain(labels)) fail('Season selectLabels are required for the human review');
   for (const key of REQUIRED_FLIGHT_LABEL_KEYS) text(labels[key], `season.selectLabels.${key}`);
-  const { date, selected } = selectedSeasonDeparture(plan);
+  const { date, selected, departure } = selectedSeasonDeparture(plan);
+  const flightIssues = flightPreflight(season, departure);
+  if (flightIssues.length) fail(flightIssues.map(issue => `${issue.field}: ${issue.message}`).join('; '));
   if (fields['depart-0-depart_date'] !== date) fail('Season outbound date must equal the selected departure start');
   for (const kind of ['adult', 'child', 'infant']) {
     const price = selected[kind];
@@ -110,6 +115,10 @@ export function validateProductOnlyLaunchPlan(input) {
   if (plan.seasonMode === 'excluded') {
     if (own(plan, 'season')) fail('Excluded season mode requires plan.season to be absent');
   } else validateSeasonCommercialBinding(plan);
+  if (own(plan, 'departure')) {
+    const checked = departurePreflight(plan);
+    if (!checked.canExecute) fail(checked.blockers.join('; '));
+  }
   const binding = createProductOnlyApprovalBinding(plan);
   if (plan.approvalBinding === undefined) plan.approvalBinding = binding;
   else if (!same(plan.approvalBinding, binding)) fail('approvalBinding must bind the exact plan and product-only scope');
@@ -284,9 +293,18 @@ function assertIdentityMatches(observed, plan) {
 }
 
 export async function readProductOnlyIdentity(page) {
-    const url = new URL(page.url());
+    let url = new URL(page.url());
     if (url.origin !== ALLOWED_ORIGIN || url.username || url.password) fail('ERP page origin is not the approved Basecamp origin');
     if (await page.locator('input[type="password"]:visible').count()) fail('Login is required; the user must log in directly before review');
+    // Successful login now lands on the v2 dashboard, which has no legacy
+    // account marker. Only leave that read-only landing page; never navigate
+    // away from a product form or any other potentially edited page.
+    if (/^\/v2\/dashboard\/?$/.test(url.pathname) && await page.locator('#eoding-name').count() === 0) {
+      await page.goto(ERP_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      url = new URL(page.url());
+      if (url.origin !== ALLOWED_ORIGIN || url.username || url.password) fail('ERP page origin is not the approved Basecamp origin');
+      if (await page.locator('input[type="password"]:visible').count()) fail('Login is required; the user must log in directly before review');
+    }
     const label = (await page.locator('#eoding-name').innerText()).trim();
     if (!label) fail('Observed ERP account name is missing');
     const cookies = (await page.context().cookies(ALLOWED_ORIGIN)).filter(cookie => cookie.httpOnly).map(cookie => ({ name: cookie.name, value: cookie.value, domain: cookie.domain, path: cookie.path })).sort((left, right) => (left.name + left.domain + left.path).localeCompare(right.name + right.domain + right.path));
@@ -331,7 +349,7 @@ export class ExistingProfileBrowser {
 async function localPreflight(plan) {
   const images = [];
   for (const source of plan.source.images) images.push({ id: source.id, path: source.path, sha256: sha256(await loadApprovedProductOnlyImage(source)), mimeType: source.mimeType });
-  return { status: 'local-inputs-verified', identity: clone(plan.identity), images, eventCreation: 'prohibited', hotelAssignment: 'prohibited' };
+  return { status: 'local-inputs-verified', identity: clone(plan.identity), images, eventCreation: plan.departure?.create ? 'one-selected-departure' : 'prohibited', hotelAssignment: 'prohibited' };
 }
 
 async function liveReadOnlyPreflight({ plan, browser, identity }) {
@@ -404,7 +422,7 @@ async function guardedMasterBaselineRecheck({ page, plan, identity }) {
  * Starts the one-human-approval product-only launcher. It opens a localhost review
  * page; execution is impossible until that page posts a CSRF/cookie/origin-checked approval.
  */
-export async function startProductOnlyLauncher({ plan: rawPlan, planPath, dataDir, browserDir, preflightOnly = false, ttlMs = DEFAULT_TTL_MS, browser, identityReader, controls, timeoutMs, preflight, verifyUploadedImage, fetchImpl, recheckBaseline } = {}) {
+export async function startProductOnlyLauncher({ plan: rawPlan, planPath, dataDir, browserDir, preflightOnly = false, ttlMs = DEFAULT_TTL_MS, browser, identityReader, controls, timeoutMs, preflight, verifyUploadedImage, fetchImpl, recheckBaseline, budgetMode = 'stop', resume, assertResume } = {}) {
   const wrapperStartedAt = Date.now();
   if (typeof preflightOnly !== 'boolean') fail('preflightOnly must be a boolean');
   if (!Number.isSafeInteger(ttlMs) || ttlMs < 1 || ttlMs > DEFAULT_TTL_MS) fail('ttlMs must be within the local review limit');
@@ -424,7 +442,12 @@ export async function startProductOnlyLauncher({ plan: rawPlan, planPath, dataDi
   }
   const identity = identityReader ?? (browserForRun ? createDefaultIdentityReader(plan) : null);
   let checked;
-  if (typeof preflight === 'function') checked = checkedPreflight(await preflight({ plan: clone(plan), local: clone(local) }), plan);
+  if (resume) {
+    if (!plan.resumeFrom || typeof assertResume !== 'function') fail('Resume requires pinned original evidence');
+    await assertResume();
+    checked = { ...local, baseline: { recordsTotal: 0, rows: [] }, basic: { status: 'resume-readback-required', businessWrites: 0 }, schedule: { status: 'resume-readback-required' } };
+  }
+  else if (typeof preflight === 'function') checked = checkedPreflight(await preflight({ plan: clone(plan), local: clone(local) }), plan);
   else if (browserForRun) checked = checkedPreflight(await liveReadOnlyPreflight({ plan, browser: browserForRun, identity }), plan);
   else checked = { ...local, baseline: { recordsTotal: 0, rows: [] }, basic: { status: 'local-only-no-browser', businessWrites: 0 }, schedule: { status: 'unverified-no-browser' } };
   const wrapperPreparationMs = Date.now() - wrapperStartedAt;
@@ -445,7 +468,7 @@ export async function startProductOnlyLauncher({ plan: rawPlan, planPath, dataDi
     onCancel: async approval => { await journal.cancelled(approval); settleReject(new Error('Local review was cancelled or expired before approval claim')); },
     onClaim: claim => journal.claim(claim),
     onReconcile: result => journal.reconcile(result),
-    beforeClaim: async () => { await recheckPlanFile(approvedPlanPath, plan); }
+    beforeClaim: async () => { await recheckPlanFile(approvedPlanPath, plan); if (resume) await assertResume(); }
   });
   const expectedBaseline = masterBaselineSignature(checked.baseline);
   const beforeBasicPrepare = async page => {
@@ -468,8 +491,22 @@ export async function startProductOnlyLauncher({ plan: rawPlan, planPath, dataDi
     controls,
     timeoutMs,
     beforeBasicPrepare
+    ,seedBasicReceipt: resume?.checkpoint.basic
   });
-  const coordinator = new ProductOnlyExecutionCoordinator({ browser: browserForRun, approval: { claim: request => store.claim(request) }, journal, adapters });
+  const verifyResume = async page => {
+    await assertResume();
+    const transport = await installStageTransport(page, `resume-reconcile:${plan.approvalBinding.planDigest}`, async () => {
+      const owner = page.context(), guard = route => ['GET', 'HEAD'].includes(route.request().method()) ? route.fallback() : route.abort();
+      await owner.route('**/*', guard);
+      return async () => owner.unroute('**/*', guard);
+    });
+    const proof = await adapters.reconcileSavedStages(page, clone(resume.checkpoint));
+    const { readback } = await import('./product-season-adapter.mjs');
+    const seasons = await readback(page, { target: { productId: String(resume.targets.productId) }, assertIdentity: async () => ({ identityDigest: digest(await identity(page)) }) });
+    if (seasons.seasons.length !== 0) fail('Existing season detected; resume cannot replay a season write');
+    await assertResume(); transport.verify(); return proof;
+  };
+  const coordinator = new ProductOnlyExecutionCoordinator({ browser: browserForRun, approval: { claim: request => store.claim(request) }, journal, adapters, budgetMode, ...(resume ? { resume: { targets: resume.targets, results: resume.results, verify: verifyResume } } : {}) });
   const coordinatorPreflight = preflightProductOnlyExecution(plan, coordinator);
   if (!coordinatorPreflight.canExecute) fail(`Product-only launcher is blocked before review: ${coordinatorPreflight.blockers.join('; ')}`);
   let executing = false;

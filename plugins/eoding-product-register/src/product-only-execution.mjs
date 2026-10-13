@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-const PHASES = Object.freeze(['basic', 'display', 'content', 'shell', 'day', 'season']);
+const PHASES = Object.freeze(['basic', 'display', 'content', 'shell', 'day', 'season', 'departure']);
 const WRITE_PHASES = Object.freeze(['basic', 'display', 'content', 'shell', 'season']);
 const DEFAULT_PROCESSING_BUDGET_MS = 20 * 60 * 1000;
 
@@ -34,18 +34,19 @@ const stableJson = value => {
 const digest = value => createHash('sha256').update(stableJson(value)).digest('hex');
 const isNewTarget = input => input?.target?.mode === 'NEW';
 const declaredTarget = input => isNewTarget(input) ? { mode: 'NEW' } : { mode: 'EXISTING', productId: input.productId };
-const phasesFor = (input, phases = PHASES) => phases.filter(phase => phase !== 'season' || input?.seasonMode !== 'excluded');
+const phasesFor = (input, phases = PHASES) => phases.filter(phase => (phase !== 'season' || input?.seasonMode !== 'excluded') && (phase !== 'departure' || input?.departure?.create === true));
 const scopeFor = input => ({
   mode: 'product-only',
   target: declaredTarget(input),
   phases: phasesFor(input),
-  eventCreation: 'prohibited',
+  eventCreation: input?.departure?.create === true ? 'one-selected-departure' : 'prohibited',
   sourceProduct: input.product ?? null,
   sourceRows: input.source?.rows?.map(row => row?.id),
   sourceImages: input.source?.images?.map(image => image?.id),
   displayedSourceImages: input.display?.images?.map(image => image?.sourceImageId),
   itinerary: input.itinerary?.map(day => ({ day: day?.day, sourceRowId: day?.sourceRowId })),
   hasSeason: Boolean(input.season)
+  ,...(input.resumeFrom ? { resumeFrom: input.resumeFrom, remainingWrites: ['season', ...(input.departure?.create ? ['departure'] : [])] } : {})
 });
 const planForDigest = input => {
   const result = clone(input);
@@ -84,7 +85,7 @@ export class UnknownSaveOutcomeError extends Error {
 
 function phaseName(phase, day) { return phase === 'day' ? `day:${day.day}` : phase; }
 function phaseAdapter(adapters, phase) { return adapters[phase]; }
-function executionPhases(adapters, input) { return phasesFor(input, adapters?.media ? ['basic','media','shell','day','season'] : PHASES); }
+function executionPhases(adapters, input) { return phasesFor(input, adapters?.media ? ['basic','media','shell','day','season','departure'] : PHASES); }
 function validateNewBinding(input, blockers) {
   if (!isNewTarget(input)) return;
   if (!input.target || Object.keys(input.target).length !== 1) blockers.push('NEW target must be exactly { mode: \'NEW\' }');
@@ -196,7 +197,7 @@ export function preflightProductOnlyExecution(input, { adapters, browser, approv
  * auth, content, image, or season implementation; callers inject guarded adapters.
  */
 export class ProductOnlyExecutionCoordinator {
-  constructor({ browser, approval, journal, adapters, preparation, clock = () => Date.now(), processingBudgetMs = DEFAULT_PROCESSING_BUDGET_MS } = {}) {
+  constructor({ browser, approval, journal, adapters, preparation, clock = () => Date.now(), processingBudgetMs = DEFAULT_PROCESSING_BUDGET_MS, budgetMode = 'stop', resume } = {}) {
     if (typeof clock !== 'function') fail('clock must be a function');
     if (!Number.isSafeInteger(processingBudgetMs) || processingBudgetMs <= 0) fail('processingBudgetMs must be a positive integer');
     this.browser = browser;
@@ -206,6 +207,9 @@ export class ProductOnlyExecutionCoordinator {
     this.preparation = preparation;
     this.clock = clock;
     this.processingBudgetMs = processingBudgetMs;
+    if (!['stop', 'report'].includes(budgetMode)) fail('budgetMode must be stop or report');
+    this.budgetMode = budgetMode;
+    this.resume = resume;
   }
 
   preflight(input) { return preflightProductOnlyExecution(input, this); }
@@ -240,7 +244,7 @@ export class ProductOnlyExecutionCoordinator {
       target: clone(declaredTarget(plan)),
       ...(newTarget ? clone(binding) : { productId: plan.productId }),
       phases: phasesFor(plan),
-      eventCreation: 'prohibited'
+      eventCreation: plan.departure?.create === true ? 'one-selected-departure' : 'prohibited'
     };
     const claim = await this.approval.claim(claimRequest);
     if (!claim || typeof claim !== 'object' || Array.isArray(claim)) fail('approval.claim must return an approval claim object');
@@ -253,19 +257,28 @@ export class ProductOnlyExecutionCoordinator {
       owned = await this.browser.open();
       if (!owned || !owned.page || typeof owned.close !== 'function') fail('browser.open must return one owned page and close function');
       const page = owned.page;
-      const targets = clone(declaredTarget(plan));
-      const results = [];
+      const targets = clone(this.resume?.targets ?? declaredTarget(plan));
+      const results = clone(this.resume?.results ?? []);
+      if (this.resume) {
+        if (!plan.resumeFrom || typeof this.resume.verify !== 'function') fail('Resume requires a bound source and read-only verifier');
+        const proof = await this.resume.verify(page);
+        if (proof?.status !== 'saved-stages-reconciled') fail('Resume saved stages were not independently verified');
+        await this._evidence({ status: 'resume-readback-verified', targets, proof });
+      }
       const steps = [
         ...(this.adapters.media ? ['basic','media','shell'] : ['basic', 'display', 'content', 'shell']).map(phase => ({ phase })),
         ...plan.itinerary.map(day => ({ phase: 'day', day })),
-        ...(plan.seasonMode === 'excluded' ? [] : [{ phase: 'season' }])
+        ...(plan.seasonMode === 'excluded' ? [] : [{ phase: 'season' }]),
+        ...(plan.departure?.create === true ? [{ phase: 'departure' }] : [])
       ];
-      for (let index = 0; index < steps.length; index += 1) {
+      if (this.resume && (!same(results.map(result => result.name), steps.slice(0, results.length).map(step => phaseName(step.phase, step.day))) || results.length >= steps.length || results.some(result => !result.verification))) fail('Resume phases are not an exact verified prefix');
+      const startIndex = results.length;
+      for (let index = startIndex; index < steps.length; index += 1) {
         const step = steps[index];
         const result = await this._writeAndVerify({ page, plan, phase: step.phase, day: step.day, targets, results, claim, binding, activeElapsed, pipelineStartedAt });
         results.push(result);
         this._bindReceiptTarget({ newTarget, phase: step.phase, receipt: result.receipt, targets });
-        if (activeElapsed() > this.processingBudgetMs && index + 1 < steps.length) {
+        if (this.budgetMode === 'stop' && activeElapsed() > this.processingBudgetMs && index + 1 < steps.length) {
           const finalCheck = { status: 'not-run', reason: 'incomplete-after-budget-overrun' };
           await this._evidence({ status: 'budget-overrun', reconciledPhase: result.name, elapsedMs: activeElapsed(), budgetMs: this.processingBudgetMs, finalCheck });
           throw new ProcessingBudgetExceededError({ elapsedMs: activeElapsed(), budgetMs: this.processingBudgetMs, reconciledPhase: result.name, finalCheck });
@@ -294,7 +307,7 @@ export class ProductOnlyExecutionCoordinator {
           activeProcessingMs: activeElapsed(),
           pipelineMs: this._elapsed(pipelineStartedAt)
         },
-        budget: { budgetMs: this.processingBudgetMs, elapsedMs, exceeded: overBudget },
+        budget: { budgetMs: this.processingBudgetMs, elapsedMs, exceeded: overBudget, mode: this.budgetMode },
         phases: results,
         finalCheck
       };
@@ -333,7 +346,7 @@ export class ProductOnlyExecutionCoordinator {
 
   _assertBudgetBeforeWrite(activeElapsed) {
     const elapsedMs = activeElapsed();
-    if (elapsedMs > this.processingBudgetMs) throw new ProcessingBudgetExceededError({ elapsedMs, budgetMs: this.processingBudgetMs });
+    if (this.budgetMode === 'stop' && elapsedMs > this.processingBudgetMs) throw new ProcessingBudgetExceededError({ elapsedMs, budgetMs: this.processingBudgetMs });
   }
 
   async _evidence(value) {
@@ -363,6 +376,7 @@ export class ProductOnlyExecutionCoordinator {
   }
 
   async _writeAndVerify({ page, plan, phase, day, targets, results, claim, binding, activeElapsed, pipelineStartedAt }) {
+    const startedAt = this._now();
     this._assertBudgetBeforeWrite(activeElapsed);
     const adapter = this.adapters[phase];
     const name = phaseName(phase, day);
@@ -375,7 +389,7 @@ export class ProductOnlyExecutionCoordinator {
       if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) throw new Error('adapter returned no save receipt');
       const verification = await adapter.verifyReceipt(page, clone(receipt), clone(context));
       if (!verification) throw new Error('adapter receipt verifier did not verify the save');
-      const result = { name, ...(phase === 'media' ? {covers:['display','content']} : {}), receipt: clone(receipt), verification: clone(verification) };
+      const result = { name, durationMs: this._elapsed(startedAt), ...(phase === 'media' ? {covers:['display','content']} : {}), receipt: clone(receipt), verification: clone(verification) };
       await this._evidence({ status: 'receipt-verified', phase: name, result, targets: clone(targets) });
       return result;
     } catch (cause) {

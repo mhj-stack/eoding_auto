@@ -55,14 +55,16 @@ test('runtime allowlist excludes local state and tests, and rejects linked sourc
   await assert.rejects(runtimeFiles(f.root), /symlink/);
 });
 
-test('marketplace resolves to the portable plugin and uses its bootstrap', async () => {
+test('portable plugin and optional parent marketplace resolve to the same bootstrap', async () => {
   const repo = fileURLToPath(new URL('../../../', import.meta.url));
   // Tests run inside plugins/eoding-product-register/tests.
   const catalogPath = path.resolve(repo, '.agents/plugins/marketplace.json');
-  const catalog = JSON.parse(await readFile(catalogPath, 'utf8'));
-  const item = catalog.plugins.find(item => item.name === 'eoding-product-register');
-  assert.equal(catalog.name, 'eoding-auto');
-  const root = path.resolve(path.dirname(path.dirname(path.dirname(catalogPath))), item.source.path);
+  const catalog = await readFile(catalogPath, 'utf8').then(JSON.parse).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+  // Installed/portable bundles have no parent marketplace repository. Validate
+  // their actual entrypoint; when a catalog exists, preserve its resolution check.
+  const item = catalog ? catalog.plugins.find(item => item.name === 'eoding-product-register') : { name: 'eoding-product-register' };
+  if (catalog) assert.equal(catalog.name, 'eoding-auto');
+  const root = catalog ? path.resolve(path.dirname(path.dirname(path.dirname(catalogPath))), item.source.path) : fileURLToPath(new URL('../', import.meta.url));
   const plugin = JSON.parse(await readFile(path.join(root, 'plugin.json'), 'utf8'));
   const config = JSON.parse(await readFile(path.join(root, 'mcp.json'), 'utf8'));
   assert.equal(plugin.name, item.name);

@@ -25,10 +25,10 @@ function cloneEntries(value) {
 
 function values(entries, name) { return entries.filter(([key]) => key === name).map(([, value]) => value); }
 
-function validateExpected(productId, entries) {
+function validateExpected(productId, entries, bookingStatus = '4') {
   const masters = values(entries, 'master_product_id');
   if (!masters.length || masters.some(value => value !== productId)) fail('Departure entries must bind the master product');
-  if (values(entries, 'status').length !== 1 || values(entries, 'status')[0] !== '4') fail('Departure entries must set closed status');
+  if (!['3', '4'].includes(bookingStatus) || values(entries, 'status').length !== 1 || values(entries, 'status')[0] !== bookingStatus) fail('Departure entries must set the explicitly approved booking status (default closed status)');
   const schedules = values(entries, 'schedule');
   if (schedules.length !== 1 || schedules[0] !== canonicalId(schedules[0])) fail('Departure entries must bind one saved schedule');
   const dates = values(entries, 'selected_dates');
@@ -94,10 +94,10 @@ async function installRedirectBarrier(page) {
 
 export async function installDepartureTransportGuard(page, input) {
   // Clone/validate before the first await so caller-owned input cannot race installation.
-  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 2 || !Object.hasOwn(input, 'productId') || !Object.hasOwn(input, 'entries')) fail('Invalid departure transport input');
+  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['productId', 'entries', 'bookingStatus'].includes(key)) || !Object.hasOwn(input, 'productId') || !Object.hasOwn(input, 'entries')) fail('Invalid departure transport input');
   const productId = canonicalId(input.productId);
   const entries = cloneEntries(input.entries);
-  validateExpected(productId, entries);
+  validateExpected(productId, entries, input.bookingStatus);
   const expectedUrl = `${ORIGIN}/tour/master_product/${productId}/create_product/?from=${productId}`;
   const expectedCreateUrl = `${ORIGIN}/tour/master_product/${productId}/create_product/`;
   requireScheduleSession(page);
