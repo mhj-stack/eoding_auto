@@ -70,6 +70,38 @@ export function createProductOnlySeasonAdapter({ origin = 'https://basecamp.team
     return { identityDigest };
   };
 
+  const openProductForSeason = async (page, target, assertSeasonIdentity) => {
+    const url = `${origin}/tour/master_product/${target.productId}/change/`;
+    const current = new URL(page.url());
+    if (current.origin !== origin || current.pathname !== new URL(url).pathname || current.search || current.username || current.password) fail('Wrong season transition target');
+    const beforeIdentity = await assertSeasonIdentity({ target });
+    const owner = page.context(); let blockedWrite = false, cdp;
+    const guard = route => {
+      const request = route.request();
+      if (['GET', 'HEAD'].includes(request.method())) return route.fallback();
+      // Always block page-load writes, including third-party telemetry. Only
+      // an unexpected ERP write invalidates this read-only product transition.
+      if (new URL(request.url()).origin === origin) blockedWrite = true;
+      return route.abort();
+    };
+    await owner.route('**/*', guard);
+    try {
+      cdp = await owner.newCDPSession(page);
+      await cdp.send('Network.enable');
+      await cdp.send('Network.setCacheDisabled', { cacheDisabled: true });
+      await cdp.send('Network.setBypassServiceWorker', { bypass: true });
+      // Day saves leave the schedule detail UI active. Reopen the exact product
+      // before locating its season tab, including when the URL itself is unchanged.
+      const response = await page.goto(url, { waitUntil: 'load', timeout: timeoutMs });
+      if (!response || response.status() !== 200 || response.url() !== url || response.fromServiceWorker() || response.request().method() !== 'GET' || response.request().redirectedFrom() || page.url() !== url) fail('Season product GET did not return the exact target');
+      if (!same(await assertSeasonIdentity({ target }), beforeIdentity)) fail('Season identity changed during product transition');
+      if (blockedWrite) fail('Unexpected write blocked during season product transition');
+    } finally {
+      await owner.unroute('**/*', guard);
+      await cdp?.detach().catch(() => {});
+    }
+  };
+
   return {
     preflight,
     async save(page, plan, context) {
@@ -82,6 +114,7 @@ export function createProductOnlySeasonAdapter({ origin = 'https://basecamp.team
       invoked = true;
       bound = clone({ binding: current.binding, target: current.target });
       const assertSeasonIdentity = identity(page, current.seasonTarget);
+      await openProductForSeason(page, current.seasonTarget, assertSeasonIdentity);
       const prepared = await native.prepare(page, { target: current.seasonTarget, plan: clone(plan.season), assertIdentity: assertSeasonIdentity });
       const receipt = await native.save(page, prepared, {
         assertIdentity: assertSeasonIdentity,

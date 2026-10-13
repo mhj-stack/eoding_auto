@@ -19,7 +19,7 @@ function preflight(plan){
   return {canExecute:!blockers.length,blockers};
 }
 /** The combined coordinator stage; approval and browser lifecycles belong to the caller. */
-export function createProductOnlyMediaAdapter({origin='https://basecamp.team',assertIdentity,authorizeWrite,record,loadImage,verifyUploadedImage,controls={displaySave:'#save-master-product',detailSave:'#save-master-product',referenceSave:'#save-master-product'},timeoutMs=15000}={}){
+export function createProductOnlyMediaAdapter({origin='https://basecamp.team',assertIdentity,authorizeWrite,record,loadImage,verifyUploadedImage,controls={displaySave:'#save-master-product',detailSave:'#save-master-product',referenceSave:'#save-master-product'},timeoutMs=15000,reconciledDetail,reconciledUploads}={}){
   if(new URL(origin).origin!==origin||!origin.startsWith('https://')||![assertIdentity,authorizeWrite,record,loadImage,verifyUploadedImage].every(fn=>typeof fn==='function'))fail('Media requires exact HTTPS origin, identity, approval, journal, image loader and image verifier');
   let invoked=false,saved=null,bound=null;
   const check=context=>{
@@ -49,7 +49,7 @@ export function createProductOnlyMediaAdapter({origin='https://basecamp.team',as
       const productId=String(current.target.productId),target={origin,productId,masterCode:current.target.masterCode,pageUrl:`${origin}/tour/master_product/${productId}/change/`,controls:clone(controls),endpoints:{display:`${origin}/tour/master_product/homepage/${productId}/`,detail:`${origin}/tour/master_product_detail/${productId}/change/`,reference:`${origin}/tour/master_product_reference/${productId}/change/`,upload:`${origin}/contents/image/create_modal/?managed_flag=false`}};
       bound=clone(current);invoked=true;
       await assertIdentity(page,clone(target));
-      saved=await applyProductContent(page,{nativePayloads:true,target,tenant:{companyId:plan.companyId,imageUrlPrefix:`https://media.eoding.com/media/travelagent/${plan.companyId}/imagecontent/`},display:{fields:clone(plan.display.fields),images:[],imageQuery:plan.display.imageQuery,useReferenceUploads:true,...(subset?{uploadIndexes}:{})},detail:clone(plan.content.detail),reference:{elements:clone(plan.content.elements),images},timeoutMs,identity:assertIdentity,record,verifyUploadedImage,beforeWrite:async event=>{check(context);await assertIdentity(page,clone(target));return authorizeWrite(clone(event),clone(context));}});
+      saved=await applyProductContent(page,{nativePayloads:true,...(reconciledUploads?{reconciledUploads:clone(reconciledUploads)}:{}),...(reconciledDetail?{reconciledDetail:clone(reconciledDetail)}:{}),target,tenant:{companyId:plan.companyId,imageUrlPrefix:`https://media.eoding.com/media/travelagent/${plan.companyId}/imagecontent/`},display:{fields:clone(plan.display.fields),images:[],imageQuery:plan.display.imageQuery,useReferenceUploads:true,...(subset?{uploadIndexes}:{})},detail:clone(plan.content.detail),reference:{elements:clone(plan.content.elements),images},timeoutMs,identity:assertIdentity,record,verifyUploadedImage,beforeWrite:async event=>{check(context);await assertIdentity(page,clone(target));return authorizeWrite(clone(event),clone(context));}});
       if(saved.status!=='content-verified')fail(`Media ${saved.status}; no automatic retry`);
       return clone(saved);
     },

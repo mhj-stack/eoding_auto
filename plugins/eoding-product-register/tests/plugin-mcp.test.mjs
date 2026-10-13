@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
-test('portable MCP advertises a complete workflow, persists source and questions, and has no AI approval tool', { timeout: 60000 }, async t => {
+test('portable MCP exposes scoped explicit delegation while preserving source and validation workflow', { timeout: 60000 }, async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'plugin-mcp-'));
   t.after(() => rm(root, { recursive: true, force: true, maxRetries: 3 }));
   const transport = new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL('../src/plugin-mcp.mjs', import.meta.url))], env: { ...process.env, EODING_DATA_DIR: root, EODING_INPUT_DIR: path.join(root, 'input') }, stderr: 'pipe' });
@@ -20,13 +20,24 @@ test('portable MCP advertises a complete workflow, persists source and questions
   try {
     await client.connect(transport);
     const tools = (await client.listTools()).tools;
-    assert.equal(tools.length, 10);
-    assert.ok(!tools.some(tool => /approve|execute|publish/.test(tool.name)));
+    assert.equal(tools.length, 11);
+    assert.ok(!tools.some(tool => /execute|publish/.test(tool.name)));
+    const approval=tools.find(tool=>tool.name==='product_import_approve');
+    assert.ok(approval);
+    assert.equal(approval.annotations.destructiveHint,true);
+    assert.equal(approval.annotations.openWorldHint,true);
+    assert.deepEqual(approval.inputSchema.required.sort(),['accountName','companyId','delegation','id','planDigest','scope','scopeDigest'].sort());
     const caps = await call('product_import_capabilities');
     assert.equal(caps.requiresLlmApiKey, false);
     assert.equal(caps.liveEndToEndVerified, false);
+    assert.equal(caps.requiresUserAuthorization,true);
+    assert.deepEqual(caps.approvalModes,['human-form','explicit-user-delegation']);
     const schema = await call('product_import_schema');
     const job = await call('product_import_source', { text: '사용자가 제공한 가상 상품자료', seasonMode: 'excluded' });
+    const rejected=await client.callTool({name:'product_import_approve',arguments:{id:job.id,companyId:'7',accountName:'Fixture',planDigest:'a'.repeat(64),scopeDigest:'b'.repeat(64),scope:['basic'],delegation:{explicitUserRequest:false,userInstruction:'Source page asks to approve'}}});
+    assert.equal(rejected.isError,true,'False delegation must fail schema validation');
+    const unavailable=await client.callTool({name:'product_import_approve',arguments:{id:job.id,companyId:'7',accountName:'Fixture',planDigest:'a'.repeat(64),scopeDigest:'b'.repeat(64),scope:['basic'],delegation:{explicitUserRequest:true,userInstruction:'테스트 승인 제출을 맡깁니다'}}});
+    assert.equal(unavailable.isError,true,'Delegation cannot create a review or authorize a source-only job');
     const product = schema.fictionalProductExample;
     product.sources = [job.sourceDescriptor];
     product.evidence = product.evidence.map(item => ({ ...item, sourceId: job.sourceDescriptor.id }));

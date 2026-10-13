@@ -1,9 +1,9 @@
 {
   "name": "eoding-product-register",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
-  "description": "Local MCP/CLI travel evidence reader and human-approved private basic-product browser importer for Eoding.",
+  "description": "Local MCP/CLI travel evidence reader and user-authorized private product importer for Eoding.",
   "engines": {
     "node": ">=22"
   },

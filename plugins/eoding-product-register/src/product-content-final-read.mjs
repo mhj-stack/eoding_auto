@@ -31,12 +31,12 @@ export async function readNativeProductContent(page,{receipt,identity,timeoutMs=
   if(!response||response.status()!==200||response.url()!==target.pageUrl||response.fromServiceWorker())fail('Fresh native GET failed');await assertIdentity();
   const payloads={};
   for(const [key,tab] of [['display','base'],['detail','detail'],['reference','productreference']]){
-   const link=page.locator(`a[href="#${tab}"]`);if(await link.count()===1)await link.click();await assertIdentity();let timer;
+   await page.waitForLoadState('load',{timeout:timeoutMs});const link=page.locator(`a[href="#${tab}"]`);if(await link.count()===1)await link.click();await page.locator({base:'#homepage_post',detail:'#include',productreference:'#reference_form'}[tab]).waitFor({state:'visible',timeout:timeoutMs});await assertIdentity();let timer;
    const packet=new Promise((resolve,reject)=>{timer=setTimeout(()=>reject(Error('Native final capture timed out')),timeoutMs);pending={key,url:target.endpoints[key],used:false,resolve,reject};});packet.catch(()=>{});
    try{await page.locator(target.controls[key+'Save']).click({timeout:timeoutMs});payloads[key]=await packet;}finally{clearTimeout(timer);pending=null;}
    if(!same(payloads[key],receipt.persisted.payloads[key]))fail('Persisted native '+key+' changed');
   }
-  const tab=page.locator('a[href="#base"]');if(await tab.count()===1)await tab.click();
+  const tab=page.locator('a[href="#base"]');if(await tab.count()===1)await tab.click();await page.locator('#homepage_post').waitFor({state:'visible',timeout:timeoutMs});
   if(receipt.persisted.images.length)await page.waitForFunction(count=>{const images=[...document.querySelectorAll('#image_homepage_area .image_list img')];return images.length===count&&images.every(x=>x.complete&&x.naturalWidth>0);},receipt.persisted.images.length,{timeout:timeoutMs});
   const imageState=await readDisplayImageState(page),images=imageState.images.map(({id,src})=>({id,src}));if(!same(images,receipt.persisted.images))fail('Persisted native images changed');
   await assertIdentity();if(unexpected)fail('Unexpected native mutation blocked during final read');

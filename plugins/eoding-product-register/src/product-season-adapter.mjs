@@ -151,7 +151,7 @@ async function assertSelectChoice(control, name, value, label) {
   if (label !== undefined && selected.label !== label) throw new Error(`native season select label differs: ${name}`);
 }
 
-async function chooseAjaxSelect(page, control, name, value, label, query) {
+export async function chooseAjaxSelect(page, control, name, value, label, query) {
   if (label === undefined) throw new Error(`empty AJAX season select requires plan.selectLabels: ${name}`);
   if (query === undefined) throw new Error(`empty AJAX season select requires plan.selectQueries: ${name}`);
   const { id, dataUrl } = await control.evaluate(element => ({ id: element.id, dataUrl: element.getAttribute('data-url') }));
@@ -160,35 +160,52 @@ async function chooseAjaxSelect(page, control, name, value, label, query) {
   const rendered = page.locator(`#select2-${id}-container`);
   if (await rendered.count() !== 1) throw new Error(`native Select2 rendered control is missing or ambiguous: ${name}`);
   await rendered.locator('xpath=..').click();
-  const search = page.locator('.select2-container--open .select2-search__field');
+  // Production keeps closed dropdowns attached during transitions. Bind the
+  // search and results to this native select instead of every open container.
+  const resultsId = `select2-${id}-results`;
+  const dropdown = page.locator('.select2-dropdown').filter({ has: page.locator(`[id="${resultsId}"]`) });
+  const search = dropdown.locator('.select2-search__field');
   if (await search.count() !== 1) throw new Error(`native Select2 search control is missing or ambiguous: ${name}`);
   const matchingRead = candidate => {
     try {
       const url = new URL(candidate.url());
-      return candidate.method() === 'GET' && url.origin === endpoint.origin && url.pathname === endpoint.pathname;
+      return candidate.method() === 'GET' && url.origin === endpoint.origin && url.pathname === endpoint.pathname
+        && [...url.searchParams.values()].includes(query);
     } catch { return false; }
   };
-  const request = page.waitForRequest(matchingRead, { timeout: 3_000 });
+  // Observe the response and its own request together; an unrelated query may
+  // finish while this dropdown is searching the approved query.
   const response = page.waitForResponse(candidate => matchingRead(candidate.request()), { timeout: 3_000 });
   await search.fill(query);
-  const [observed, completed] = await Promise.all([request, response]);
+  const completed = await response, observed = completed.request();
   const observedUrl = new URL(observed.url());
   if (observedUrl.origin !== endpoint.origin || observedUrl.pathname !== endpoint.pathname) throw new Error(`native Select2 used an unexpected read endpoint: ${name}`);
   if (![...observedUrl.searchParams.values()].includes(query)) throw new Error(`native Select2 did not use the approved query: ${name}`);
   if (!completed.ok()) throw new Error(`native Select2 read response was not accepted: ${name}`);
-  const settled = await page.waitForFunction(({ expected, loadingClasses }) => {
-    const open = [...document.querySelectorAll('.select2-container--open')];
-    if (open.length !== 1) return null;
-    const results = [...open[0].querySelectorAll('.select2-results__option')];
+  if (await completed.finished()) throw new Error(`native Select2 read response did not finish: ${name}`);
+  const settled = await page.waitForFunction(({ expected, loadingClasses, resultsId }) => {
+    const lists = [...document.querySelectorAll('[id]')].filter(node => node.id === resultsId);
+    if (lists.length !== 1 || lists[0].getAttribute('aria-expanded') !== 'true') return null;
+    const results = [...lists[0].querySelectorAll('.select2-results__option')];
     if (results.some(item => loadingClasses.some(className => item.classList.contains(className)))) return null;
-    return results.map((item, index) => item.textContent === expected ? index : -1).filter(index => index >= 0);
-  }, { expected: label, loadingClasses: SELECT2_LOADING_CLASSES }, { timeout: 3_000 });
+    const exact = results.map((item, index) => item.textContent === expected ? index : -1).filter(index => index >= 0);
+    // A successful read can precede Select2's DOM update. Empty arrays are
+    // truthy, so explicitly keep waiting; duplicate matches still fail below.
+    return exact.length ? exact : null;
+  }, { expected: label, loadingClasses: SELECT2_LOADING_CLASSES, resultsId }, { timeout: 3_000 });
   const exact = await settled.jsonValue();
   if (exact.length !== 1) throw new Error(`native Select2 exact result is missing or ambiguous: ${name}`);
-  const results = page.locator('.select2-container--open .select2-results__option');
+  const results = dropdown.locator('.select2-results__option');
   await results.nth(exact[0]).click();
   await assertSelectChoice(control, name, value, label);
-  if (await rendered.textContent() !== label) throw new Error(`native Select2 rendered label differs: ${name}`);
+  const displayedLabel = await rendered.evaluate(element => {
+    const copy = element.cloneNode(true);
+    // Select2 places its clear button inside the rendered label container.
+    // Ignore only that explicit adornment; preserve all actual label text.
+    for (const clear of copy.querySelectorAll('.select2-selection__clear')) clear.remove();
+    return copy.textContent;
+  });
+  if (displayedLabel !== label) throw new Error(`native Select2 rendered label differs: ${name}`);
 }
 
 async function setSelect(page, name, value, label, query) {
@@ -197,7 +214,25 @@ async function setSelect(page, name, value, label, query) {
   if (await control.count() !== 1) throw new Error(`native season select is missing or ambiguous: ${name}`);
   const options = await control.locator('option').evaluateAll(items => items.map(item => item.value));
   if (!options.includes(value) && await control.getAttribute('data-url') !== null) return chooseAjaxSelect(page, control, name, value, label, query);
-  await control.selectOption(value);
+  if (await control.isVisible()) await control.selectOption(value);
+  else {
+    const choices = await control.locator('option').evaluateAll(items => items.map(item => ({ value:item.value, label:item.textContent, disabled:item.disabled || item.parentElement?.disabled === true })));
+    const matches = choices.filter(option => option.value === value && !option.disabled);
+    if (!await control.isEnabled() || matches.length !== 1 || !matches[0].label?.trim() || (label !== undefined && matches[0].label !== label)) throw new Error(`native season option is missing or ambiguous: ${name}`);
+    const selectedLabel = matches[0].label.trim(), wrapper = control.locator('..');
+    if (!(await wrapper.getAttribute('class') ?? '').split(/\s+/).includes('select-wrapper')) throw new Error(`unsupported hidden season select: ${name}`);
+    const trigger = wrapper.locator('input.select-dropdown.dropdown-trigger');
+    if (await trigger.count() !== 1 || !await trigger.isVisible() || !await trigger.isEnabled()) throw new Error(`native season dropdown trigger is missing or ambiguous: ${name}`);
+    const menuId = await trigger.getAttribute('data-target');
+    if (!menuId || !/^[A-Za-z0-9_-]+$/.test(menuId)) throw new Error(`native season dropdown target is invalid: ${name}`);
+    const menu = page.locator(`ul[id="${menuId}"]`);
+    if (await menu.count() !== 1) throw new Error(`native season dropdown menu is missing or ambiguous: ${name}`);
+    await trigger.click();await menu.waitFor({state:'visible'});
+    const escaped = selectedLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const option = menu.locator('li:not(.disabled):not([aria-disabled="true"]) span').filter({hasText:new RegExp('^\\s*'+escaped+'\\s*$')});
+    if (await option.count() !== 1 || !await option.isVisible()) throw new Error(`native season dropdown option is missing or ambiguous: ${name}`);
+    await option.click();
+  }
   await assertSelectChoice(control, name, value, label);
 }
 
@@ -225,27 +260,58 @@ async function chooseDates(page, selectedDates) {
   return chosen;
 }
 
-async function savedForm(page, html, seasonId) {
-  return page.evaluate(({ source, expectedSeasonId }) => {
+async function savedForm(page, html, seasonId, plan) {
+  return page.evaluate(({ source, expectedSeasonId, approvedNames }) => {
     const doc = new DOMParser().parseFromString(source, 'text/html');
     const form = doc.querySelector('#season_frm');
     if (!(form instanceof HTMLFormElement)) throw new Error('saved native season form is unavailable');
     const tuples = [...new FormData(form)].filter(([name]) => name !== 'csrfmiddlewaretoken').map(([name, value]) => [name, String(value)]);
-    const selects = {};
-    for (const select of form.querySelectorAll('select[name][data-init-id]')) {
-      const initId = select.getAttribute('data-init-id');
-      if (initId === null || !initId) throw new Error(`saved native select lacks data-init-id: ${select.name}`);
+    for (const name of approvedNames) if ([...form.elements].filter(element => element.name === name).length !== 1) throw new Error(`saved approved control is missing or duplicated: ${name}`);
+    const selects = {}, ajaxNames = new Set();
+    const blankOptionalRow = select => {
+      const match = /^(depart|arrive)-([1-9]\d*)-(airline|depart_cd|arrive_cd)$/.exec(select.name);
+      if (!match) return false;
+      const prefix = `${match[1]}-${match[2]}-`, row = select.closest('tr');
+      if (!row || row.style.display !== 'none' || row.parentElement?.id !== `${match[1]}_rows` || approvedNames.some(name => name.startsWith(prefix))) return false;
+      const controls = [...form.elements].filter(element => element.name.startsWith(prefix));
+      const expected = ['id','depart_date','flight_no','depart_time','arrive_time','moving_time','code_share','airline','depart_cd','arrive_cd','next_day'].map(name => prefix + name).sort();
+      if (JSON.stringify(controls.map(element => element.name).sort()) !== JSON.stringify(expected)) return false;
+      return controls.every(element => element.closest('tr') === row && element.value === '' && (!element.hasAttribute('data-init-id') || element.getAttribute('data-init-id') === ''))
+        && controls.find(element => element.name === prefix + 'id')?.type === 'hidden';
+    };
+    for (const select of form.querySelectorAll('select[name]')) {
       if (Object.hasOwn(selects, select.name)) throw new Error(`saved native select is duplicated: ${select.name}`);
-      selects[select.name] = initId;
+      const optional = /^((?:depart|arrive)-[1-9]\d*-)(?:airline|depart_cd|arrive_cd)$/.exec(select.name);
+      if (optional && !approvedNames.some(name => name.startsWith(optional[1])) && !blankOptionalRow(select)) throw new Error(`unused flight row is not wholly blank and hidden: ${select.name}`);
+      if (select.hasAttribute('data-init-id')) {
+        const initId = select.getAttribute('data-init-id');
+        if (!initId && !blankOptionalRow(select)) throw new Error(`saved native select lacks data-init-id: ${select.name}`);
+        selects[select.name] = initId;
+        ajaxNames.add(select.name);
+      } else selects[select.name] = select.value;
     }
     // `id` is reused by nested flight controls. The direct form-level id alone is season identity.
     const topIds = [...form.querySelectorAll(':scope > input[name="id"]')].map(input => input.value);
     if (topIds.length !== 1 || topIds[0] !== expectedSeasonId) throw new Error('saved season form top id does not have the receipt season id');
     const selected = tuples.filter(([name]) => name === 'selected_dates').map(([, value]) => value);
     if (selected.length !== 1 || !selected[0]) throw new Error('saved season form has no selected_dates');
-    const fields = Object.fromEntries(tuples.filter(([name]) => name !== 'product_id' && name !== 'id' && !Object.hasOwn(selects, name)));
+    const fields = Object.fromEntries(tuples.filter(([name]) => name !== 'product_id' && name !== 'id' && !ajaxNames.has(name)));
     return { tuples, fields, selects, selectedDates: selected[0].split(',') };
-  }, { source: html, expectedSeasonId: seasonId });
+  }, { source: html, expectedSeasonId: seasonId, approvedNames: [...Object.keys(plan.fields), ...Object.keys(plan.selects)] });
+}
+
+async function verifySavedSeasonData(page, { target, plan, origin, form, baselineSeasonIds, seasonId, list }) {
+  const baseline = new Set(baselineSeasonIds), created = list.seasons.filter(id => !baseline.has(id));
+  if (list.seasons.length !== baselineSeasonIds.length + 1 || baselineSeasonIds.some(id => !list.seasons.includes(id)) || created.length !== 1 || created[0] !== seasonId) throw new Error('season list membership is not exactly the baseline plus the receipt ID');
+  const html = await fetchDocument(page, `${origin}${LIST_PATH}${seasonId}/change/`);
+  const saved = await savedForm(page, html, seasonId, plan);
+  for (const name of Object.keys(plan.fields)) {
+    const expected = form.find(([field]) => field === name)?.[1];
+    if (expected === undefined || !Object.hasOwn(saved.fields, name) || normalizeRead(name, saved.fields[name]) !== normalizeRead(name, expected)) throw new Error(`saved native season field differs: ${name}`);
+  }
+  if (stable(saved.selectedDates) !== stable(plan.selectedDates)) throw new Error('saved selected_dates differ from actual approved calendar dates');
+  for (const [name, value] of Object.entries(plan.selects)) if (saved.selects[name] !== value) throw new Error(`saved select value differs: ${name}`);
+  return { productId: target.productId, seasonId, fields: Object.fromEntries(Object.entries(saved.fields).map(([name, value]) => [name, normalizeRead(name, value)])), selects: saved.selects, selectedDates: saved.selectedDates };
 }
 
 function preparedShape(prepared) {
@@ -280,7 +346,9 @@ async function installGuard(page, writeUrl, expected) {
     const request = route.request();
     if (request.method() === 'GET' || request.method() === 'HEAD') return route.fallback();
     if (request.method() !== 'POST' || request.url() !== writeUrl || posts !== 0) {
-      blocked = 'unexpected browser write';
+      // Foreign telemetry is still aborted, but cannot turn an accepted ERP
+      // save into an unknown outcome. Unexpected ERP writes remain fatal.
+      if (new URL(request.url()).origin === new URL(writeUrl).origin) blocked = 'unexpected browser write';
       return route.abort();
     }
     try {
@@ -346,9 +414,12 @@ function methods({ origin: configuredOrigin, responseTimeoutMs = 25_000 } = {}) 
     if (await seasonTab.count() !== 1) throw new Error('native season tab is missing or ambiguous');
     await seasonTab.click();
     const add = page.locator('#add_season');
+    await add.waitFor({ state:'visible', timeout:responseTimeoutMs });
     if (await add.count() !== 1) throw new Error('native add season control is missing or ambiguous');
     await add.click();
-    if (await page.locator('#season_frm #id_title').count() !== 1) throw new Error('native season form did not open');
+    const title = page.locator('#season_frm #id_title');
+    await title.waitFor({ state:'visible', timeout:responseTimeoutMs });
+    if (await title.count() !== 1) throw new Error('native season form did not open');
     for (const [name, value] of Object.entries(plan.fields)) await setInput(page, name, value);
     for (const [name, value] of Object.entries(plan.selects)) await setSelect(page, name, value, plan.selectLabels[name], plan.selectQueries[name]);
     const selectedDates = await chooseDates(page, plan.selectedDates);
@@ -435,24 +506,44 @@ function methods({ origin: configuredOrigin, responseTimeoutMs = 25_000 } = {}) 
     const origin = checkedOrigin(page, receipt.origin);
     const identityDigest = await identity(assertIdentity, target, 'season-verify-receipt');
     const list = await readList(page, target, origin);
-    const baseline = new Set(receipt.baselineSeasonIds);
-    const created = list.seasons.filter(id => !baseline.has(id));
-    if (list.seasons.length !== receipt.baselineSeasonIds.length + 1 || receipt.baselineSeasonIds.some(id => !list.seasons.includes(id)) || created.length !== 1 || created[0] !== receipt.seasonId) throw new Error('season list membership is not exactly the baseline plus the receipt ID');
-    const html = await fetchDocument(page, `${origin}${LIST_PATH}${receipt.seasonId}/change/`);
-    const saved = await savedForm(page, html, receipt.seasonId);
-    for (const [name] of Object.entries(plan.fields)) {
-      const expected = receipt.form.find(([field]) => field === name)?.[1];
-      if (expected === undefined || !Object.hasOwn(saved.fields, name) || normalizeRead(name, saved.fields[name]) !== normalizeRead(name, expected)) throw new Error(`saved native season field differs: ${name}`);
-    }
-    if (stable(saved.selectedDates) !== stable(plan.selectedDates)) throw new Error('saved selected_dates differ from actual approved calendar dates');
-    for (const [name, value] of Object.entries(plan.selects)) if (saved.selects[name] !== value) throw new Error(`saved select data-init-id differs: ${name}`);
-    const verification = { kind: 'season-receipt-verification-v1', seasonId: receipt.seasonId, target, identityDigest, saved: { productId: target.productId, seasonId: receipt.seasonId, fields: Object.fromEntries(Object.entries(saved.fields).map(([name, value]) => [name, normalizeRead(name, value)])), selects: saved.selects, selectedDates: saved.selectedDates }, listMembership: clone(list.seasons) };
+    const saved = await verifySavedSeasonData(page, { target, plan, origin, form: receipt.form, baselineSeasonIds: receipt.baselineSeasonIds, seasonId: receipt.seasonId, list });
+    const verification = { kind: 'season-receipt-verification-v1', seasonId: receipt.seasonId, target, identityDigest, saved, listMembership: clone(list.seasons) };
     const stage = stagedReceipts.get(receipt.bindingDigest);
     if (stage) { stage.verify(); stagedReceipts.delete(receipt.bindingDigest); }
     return verification;
   }
 
-  return { prepare, save, readback, verifyReceipt };
+  /** Read-only evidence for an uncertain save; never constructs a historical POST receipt. */
+  async function reconcileSavedSeason(page, { prepared: rawPrepared, assertIdentity } = {}) {
+    const prepared = clone(rawPrepared), target = preparedShape(prepared), plan = normalizePlan(prepared.plan);
+    const baseline = prepared.baselineSeasonIds;
+    if (!Array.isArray(baseline) || baseline.some(id => !PRODUCT_ID.test(id)) || new Set(baseline).size !== baseline.length
+      || prepared.form.some(tuple => !Array.isArray(tuple) || tuple.length !== 2 || tuple.some(value => typeof value !== 'string'))
+      || sha256(prepared.form) !== prepared.formDigest || prepared.binding.formDigest !== prepared.formDigest
+      || stable(prepared.binding.target) !== stable(target) || prepared.binding.origin !== prepared.origin || prepared.binding.identityDigest !== prepared.identityDigest
+      || stable(prepared.binding.baselineSeasonIds) !== stable(baseline) || stable(prepared.selectedDates) !== stable(plan.selectedDates)
+      || prepared.binding.version !== 1 || prepared.binding.phase !== 'season') fail('prepared season reconciliation evidence changed');
+    const origin = checkedOrigin(page, prepared.origin), context = page.context();
+    let cdp, unexpected = false;
+    const guard = route => {
+      const request = route.request();
+      if (['GET','HEAD'].includes(request.method())) return route.fallback();
+      if (new URL(request.url()).origin === origin) unexpected = true;
+      return route.abort();
+    };
+    await context.route('**/*', guard);
+    try {
+      cdp = await context.newCDPSession(page);await cdp.send('Network.enable');await cdp.send('Network.setCacheDisabled',{cacheDisabled:true});await cdp.send('Network.setBypassServiceWorker',{bypass:true});
+      const identityDigest = await identity(assertIdentity, target, 'season-read-only-reconciliation');
+      const list = await readList(page, target, origin), created = list.seasons.filter(id => !baseline.includes(id));
+      if (created.length !== 1) fail('season reconciliation requires exactly one new saved season');
+      const seasonId = created[0], saved = await verifySavedSeasonData(page, { target, plan, origin, form: prepared.form, baselineSeasonIds: baseline, seasonId, list });
+      if (checkedOrigin(page, origin) !== origin || await identity(assertIdentity, target, 'season-read-only-reconciliation-final') !== identityDigest || stable((await readList(page,target,origin)).seasons) !== stable(list.seasons) || unexpected) fail('season changed during read-only reconciliation');
+      return { kind:'season-read-only-reconciliation-v1',target,origin,seasonId,bindingDigest:prepared.binding.digest,planDigest:prepared.planDigest,formDigest:prepared.formDigest,originalIdentityDigest:prepared.identityDigest,identityDigest,saved,listMembership:clone(list.seasons),baselineSeasonIds:clone(baseline),forwardedWrites:0 };
+    } finally { await context.unroute('**/*', guard);await cdp?.detach().catch(()=>{}); }
+  }
+
+  return { prepare, save, readback, verifyReceipt, reconcileSavedSeason };
 }
 
 export function createSeasonAdapter(options) { return methods(options); }
@@ -461,3 +552,4 @@ export const prepare = standalone.prepare;
 export const save = standalone.save;
 export const readback = standalone.readback;
 export const verifyReceipt = standalone.verifyReceipt;
+export const reconcileSavedSeason = standalone.reconcileSavedSeason;

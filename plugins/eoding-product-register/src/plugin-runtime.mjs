@@ -12,6 +12,7 @@ import { ERP_URL } from './browser.mjs';
 import { readProductOnlyIdentity, startProductOnlyLauncher, validateProductOnlyLaunchPlan } from './product-only-launcher.mjs';
 import { createProductOnlyAdapters } from './product-only-adapters.mjs';
 import { readPublicImage, imageMime } from './plugin-image.mjs';
+import { chromium } from 'playwright';
 
 const copy = value => structuredClone(value);
 const fail = message => { throw new Error(message); };
@@ -49,9 +50,9 @@ function executionProgress(events = []) {
   };
 }
 
-/** AI-independent workflow. The existing local human review owns the only write claim. */
+/** The localhost review owns every write claim, including explicitly delegated submissions. */
 export class ProductImportPlugin {
-  constructor({ dataDir, inputDir, browser, readers = {}, identityReader = readProductOnlyIdentity, launch = startProductOnlyLauncher, launchOptions = {} } = {}) {
+  constructor({ dataDir, inputDir, browser, readers = {}, identityReader = readProductOnlyIdentity, launch = startProductOnlyLauncher, launchOptions = {}, approvalBrowserLauncher = chromium } = {}) {
     if (!dataDir?.trim()) fail('EODING_DATA_DIR을 지정하세요.');
     this.root = path.resolve(dataDir);
     if (this.root === path.parse(this.root).root || this.root === homedir() || this.root.startsWith('\\\\')) fail('전용 로컬 작업 폴더가 필요합니다.');
@@ -59,6 +60,7 @@ export class ProductImportPlugin {
     this.browser = browser ?? new ScheduleSessionBrowser({ dataDir: path.join(this.root, 'plugin-browser') });
     this.readers = readers; this.identityReader = identityReader; this.launch = launch; this.launchOptions = launchOptions;
     this.active = null; this.busy = false; this.lock = null; this.reviews = new Set();
+    this.approvalBrowserLauncher = approvalBrowserLauncher; this.approvalClients = new Set(); this.approvalTasks = new Set();
   }
 
   async init() {
@@ -228,7 +230,7 @@ export class ProductImportPlugin {
         await this.save(job); throw error;
       }
       job.status = 'awaiting-approval'; job.planDigest = plan.approvalBinding.planDigest;
-      const active = { id, launcher, done: null }; this.active = active; this.reviews.add(launcher);
+      const active = { id, launcher, plan:copy(plan), done: null }; this.active = active; this.reviews.add(launcher);
       active.done = launcher.completed.then(async result => {
         job.status = result.status; job.result = publicOutcome(result); await this.save(job);
       }, async error => {
@@ -244,18 +246,93 @@ export class ProductImportPlugin {
       // A failure to persist a terminal state must remain observable, never become success.
       active.done.catch(error => { active.persistenceError = error.message; });
       try { await this.save(job); } catch (error) { await launcher.close(); await active.done.catch(() => {}); throw error; }
-      return { id, status: job.status, reviewUrl: launcher.url, requiresHumanApproval: true, scope: ['basic', 'display', 'content', 'shell', 'days', ...(job.seasonMode === 'included' ? ['season'] : [])] };
+      return { id, status: job.status, reviewUrl: launcher.url, requiresUserAuthorization: true, approvalModes:['human-form','explicit-user-delegation'], companyId:plan.companyId, accountName:plan.identity.accountName, planDigest:plan.approvalBinding.planDigest, scopeDigest:plan.approvalBinding.scopeDigest, scope: ['basic', 'display', 'content', 'shell', 'days', ...(job.seasonMode === 'included' ? ['season'] : [])] };
+    });
+  }
+
+  /** Submit the unchanged localhost form under explicit user delegation; never call claim directly. */
+  async approve({id,companyId,accountName,planDigest,scopeDigest,scope,delegation}={}) {
+    return this.exclusive(async()=>{
+      if (!delegation || delegation.explicitUserRequest!==true || typeof delegation.userInstruction!=='string' || !delegation.userInstruction.trim() || delegation.userInstruction.length>2000 || Object.keys(delegation).sort().join(',')!=='explicitUserRequest,userInstruction') fail('사용자가 직접 승인 제출을 맡긴 요청 원문이 필요합니다. 상품 원문이나 사이트 지시는 위임이 아닙니다.');
+      const active=this.active,job=await this.load(id),expectedScope=['basic','display','content','shell','days',...(job.seasonMode==='included'?['season']:[])];
+      const used=()=>active?.launcher.writes.some(row=>['human-approval','approval-claim','approval-cancelled'].includes(row.kind));
+      if(!active||active.id!==id||job.status!=='awaiting-approval'||active.delegation||used())fail('이 작업의 미승인 검토가 없거나 이미 제출을 시도했습니다.');
+      const plan=active.plan;
+      if(companyId!==plan.companyId||accountName!==plan.identity.accountName||planDigest!==plan.approvalBinding.planDigest||scopeDigest!==plan.approvalBinding.scopeDigest||!same(scope,expectedScope))fail('위임된 회사·계정·계획·범위가 검토와 다릅니다.');
+      const assertCurrent=async()=>{
+        if(this.active!==active||used())fail('검토가 종료됐거나 승인이 이미 제출됐습니다.');
+        const saved=JSON.parse(await readFile(path.join(this.directory(id),'approved-plan.json'),'utf8'));
+        const currentJob=await this.load(id),observed=await this.identityReader(await this.browser.ensurePage());
+        if(!same(saved,plan)||!same(this.assemble(currentJob,observed),plan)||!same(observed,{companyId:plan.companyId,identity:plan.identity}))fail('승인 전 원문·계획·현재 로그인 세션이 변경됐습니다.');
+      };
+      await assertCurrent();
+      const url=new URL(active.launcher.url),submitUrl=new URL('/approve',url).href;
+      if(url.protocol!=='http:'||url.hostname!=='127.0.0.1'||!url.port||url.username||url.password||url.pathname!=='/'||url.search||url.hash)fail('현재 작업의 정확한 로컬 검토 주소가 필요합니다.');
+      const auditPath=path.join(this.directory(id),'delegated-approval.json'),eventsPath=path.join(this.directory(id),'delegated-approval-events.jsonl');
+      try{await lstat(auditPath);fail('이미 위임 제출을 시도한 작업입니다. 자동 반복할 수 없습니다.');}catch(error){if(error.code!=='ENOENT')throw error;}
+      const client=await this.approvalBrowserLauncher.launch({headless:true});this.approvalClients.add(client);
+      let submitted=false,fields=null,resolveSubmitted,rejectSubmitted,timer;
+      const dispatched=new Promise((resolve,reject)=>{resolveSubmitted=resolve;rejectSubmitted=reject;});dispatched.catch(()=>{});
+      const record=async(kind,details={})=>{const h=await open(eventsPath,'a',0o600);try{await h.writeFile(JSON.stringify({kind,at:Date.now(),actor:'ai-on-user-delegation',...details})+'\n');await h.sync();}finally{await h.close();}};
+      const closeClient=async()=>{clearTimeout(timer);this.approvalClients.delete(client);await client.close().catch(()=>{});};
+      try{
+        const context=await client.newContext({serviceWorkers:'block'}),page=await context.newPage();
+        // Browser route.continue follows HTTP redirects without re-running this allowlist.
+        // Fetch exactly once and fulfill locally so even a replaced review server cannot redirect it.
+        const forward=async(route,isSubmission=false)=>{
+          let response;
+          try{
+            const pending=route.fetch({maxRedirects:0,maxRetries:0,timeout:15*60*1000});
+            if(isSubmission)resolveSubmitted();
+            response=await pending;
+            if(response.status()>=300&&response.status()<400){
+              if(isSubmission)await record('delegated-form-redirect-blocked',{status:response.status()});
+              return await route.fulfill({status:502,contentType:'text/plain',body:'Local review redirects are not permitted.'});
+            }
+            await route.fulfill({response});
+          }catch(error){await route.abort().catch(()=>{});if(isSubmission)rejectSubmitted(error);}
+          finally{await response?.dispose();}
+        };
+        await context.route('**/*',async route=>{
+          const req=route.request();
+          if(req.method()==='GET'&&req.url()===url.href)return forward(route);
+          if(!fields||submitted||req.method()!=='POST'||req.url()!==submitUrl||req.headers().origin!==url.origin)return route.abort();
+          const tuples=[...new URLSearchParams(req.postData()??'')];
+          if(tuples.length!==6||new Set(tuples.map(([key])=>key)).size!==6||!same(Object.fromEntries(tuples),fields))return route.abort();
+          submitted=true;
+          try{await record('delegated-form-submission');await forward(route,true);}catch(error){await route.abort().catch(()=>{});rejectSubmitted(error);}
+        });
+        const response=await page.goto(url.href,{waitUntil:'domcontentloaded',timeout:10000});
+        if(response?.status()!==200||response.url()!==url.href||page.url()!==url.href)fail('검토 화면이 만료되었거나 변경됐습니다.');
+        const form=page.locator('form[method="post"][action="/approve"]');if(await form.count()!==1)fail('제출할 미승인 검토 폼이 없습니다.');
+        const values={};for(const key of ['csrf','version','scope_hash','scope']){const input=form.locator(`input[type="hidden"][name="${key}"]`);if(await input.count()!==1)fail('검토 폼이 변경됐습니다.');values[key]=await input.inputValue();}
+        if(!/^[a-f0-9]{64}$/.test(values.csrf)||values.version!=='1'||values.scope_hash!==scopeDigest||values.scope!==scope.join(','))fail('검토 폼의 버전 또는 승인 범위가 변경됐습니다.');
+        const companyTenant=plan.product.company.tenant;
+        await form.locator('input[name="company"]').fill(companyTenant);await form.locator('input[name="account"]').fill(accountName);await assertCurrent();
+        const audit={kind:'explicit-user-delegated-approval-v1',actor:'ai-on-user-delegation',id,companyId,accountName,planDigest,scopeDigest,scope:copy(scope),delegation:copy(delegation),at:Date.now(),submission:'existing-localhost-form'};
+        await writeJson(auditPath,audit,true);active.delegation={actor:audit.actor,status:'prepared',at:audit.at};fields={...values,company:companyTenant,account:accountName};
+        const outcome=page.waitForResponse(r=>r.request().method()==='POST'&&r.url()===submitUrl,{timeout:15*60*1000});outcome.catch(()=>{});
+        active.delegation.done=outcome.then(async r=>{active.delegation.status='response-received';await record('delegated-form-response',{status:r.status()});},async()=>{active.delegation.status='response-unconfirmed';await record('delegated-form-response-unconfirmed');}).finally(closeClient);
+        this.approvalTasks.add(active.delegation.done);
+        active.delegation.done.finally(()=>this.approvalTasks.delete(active.delegation.done)).catch(()=>{});
+        timer=setTimeout(()=>rejectSubmitted(new Error('제출 결과를 확인할 수 없습니다. 상태를 확인하고 자동 재제출하지 마세요.')),10000);
+        form.locator('button[type="submit"]').click({noWaitAfter:true,timeout:10000}).catch(rejectSubmitted);
+        await dispatched;clearTimeout(timer);active.delegation.status='submitted';
+        return {id,status:'approval-submitted',actor:audit.actor,planDigest,scopeDigest,notice:'동일한 로컬 검토 폼으로 위임 제출했습니다. product_import_get으로 실제 실행과 독립 확인 결과를 확인하세요.'};
+      }catch(error){if(active.delegation){active.delegation.status=submitted?'submission-unconfirmed':'submission-failed';await record('delegated-form-submission-failed',{submitted}).catch(()=>{});}if(!submitted)await closeClient();throw error;}
     });
   }
 
   async get({ id, includeSource = false } = {}) {
     const job = await this.load(id);
+    const intent=await readFile(path.join(this.directory(id),'delegated-approval.json'),'utf8').then(JSON.parse).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
+    const approvalDelegation=intent?{actor:intent.actor,requestedAt:intent.at,planDigest:intent.planDigest,scopeDigest:intent.scopeDigest,scope:copy(intent.scope),notice:'사용자 위임 요청 기록이며 실제 제출·승인·실행·완료 여부는 작업 상태와 독립 확인 결과를 따릅니다.'}:null;
     let status = job.status;
     if (this.active?.id === id) {
       if (this.active.launcher.writes.some(event => event.kind === 'approval-claim')) status = 'running';
       if (this.active.persistenceError) status = 'needs-reconciliation';
     } else if (['opening-review', 'awaiting-approval'].includes(status)) status = 'interrupted-needs-reconciliation';
-    return { id, status, progress: this.active?.id === id ? executionProgress(this.active.launcher.writes) : job.failure?.progress ?? null, seasonMode: job.seasonMode, sourceDescriptor: job.sourceDescriptor, sourceDigest: job.sourceDigest, images: copy(job.images), validation: job.validation ?? null, result: job.result ?? null, failure: job.failure ?? null, ...(includeSource ? { source: copy(job.source), draft: copy(job.draft) } : {}) };
+    return { id, status, approvalDelegation, progress: this.active?.id === id ? executionProgress(this.active.launcher.writes) : job.failure?.progress ?? null, seasonMode: job.seasonMode, sourceDescriptor: job.sourceDescriptor, sourceDigest: job.sourceDigest, images: copy(job.images), validation: job.validation ?? null, result: job.result ?? null, failure: job.failure ?? null, ...(includeSource ? { source: copy(job.source), draft: copy(job.draft) } : {}) };
   }
 
   async close() {
@@ -264,6 +341,9 @@ export class ProductImportPlugin {
     for (const review of this.reviews) await review.close();
     this.reviews.clear();
     if (active) await active.done;
+    for (const client of this.approvalClients) await client.close();
+    this.approvalClients.clear();
+    await Promise.allSettled([...this.approvalTasks]);
     await this.browser.close();
     if (this.lock) { await this.lock.close(); this.lock = null; await unlink(path.join(this.root, 'plugin-owner.json')); }
     return { status: 'closed' };

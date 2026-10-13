@@ -9,12 +9,12 @@ import {readNativeProductContent} from './product-content-final-read.mjs';
 import {installStageTransport} from './stage-transport.mjs';
 const clone=x=>structuredClone(x),fail=m=>{throw Error(m)};
 /** Internal composition only: caller owns human approval, durable journal, and browser lifecycle. */
-export function createProductOnlyAdapters({plan,identity,authorizeWrite,record,loadImage,verifyUploadedImage,controls,timeoutMs=15000,beforeBasicPrepare,seedBasicReceipt}={}){
+export function createProductOnlyAdapters({plan,identity,authorizeWrite,record,loadImage,verifyUploadedImage,controls,timeoutMs=15000,beforeBasicPrepare,seedBasicReceipt,reconciledDetail,reconciledUploads}={}){
  const approved=clone(plan);
  if(!same(approved?.target,{mode:'NEW'})||!same(approved.approvalBinding,createProductOnlyApprovalBinding(approved)))fail('Composition requires an exact bound NEW plan');
  const assertIdentity=async page=>{const observed=await identity(page);if(!same(observed,approved.identity))fail('Approved identity changed');return digest(observed);};
  const stages=createProductOnlyStageAdapters({identity,authorizeWrite,record,beforeBasicPrepare,seedBasicReceipt});
- const media=createProductOnlyMediaAdapter({assertIdentity,authorizeWrite,record,loadImage,verifyUploadedImage,controls,timeoutMs});
+ const media=createProductOnlyMediaAdapter({assertIdentity,authorizeWrite,record,loadImage,verifyUploadedImage,controls,timeoutMs,reconciledDetail,reconciledUploads});
  const seasonExcluded=approved.seasonMode==='excluded';
  if(seasonExcluded&&Object.hasOwn(approved,'season'))fail('Excluded season mode requires plan.season to be absent');
  const season=seasonExcluded?null:createProductOnlySeasonAdapter({assertIdentity,authorizeWrite,record,timeoutMs});
@@ -27,7 +27,14 @@ export function createProductOnlyAdapters({plan,identity,authorizeWrite,record,l
   save:async(page,p,c)=>{bindingCheck(p,c);await assertIdentity(page);return adapter.save(page,p,c);}
  });
  const receipt=(c,name)=>{const matches=c.verifiedPreviousPhases?.filter(x=>x.name===name);if(matches?.length!==1||!matches[0].verification)fail('Missing verified '+name+' phase');return clone(matches[0].receipt);};
- return {basic:wrap(stages.basic),media:wrap(media),shell:wrap(stages.shell),day:wrap(stages.day),...(season?{season:wrap(season)}:{}),finalCheck:{
+ return {basic:wrap(stages.basic),media:wrap(media),shell:wrap(stages.shell),day:wrap(stages.day),...(season?{season:wrap(season)}:{}),
+ async reconcileSavedStages(page,checkpoint){
+  await assertIdentity(page);
+  if(checkpoint?.media?.target?.productId!==String(checkpoint?.basic?.productId)||checkpoint.media.target.masterCode!==checkpoint.basic.masterCode)fail('Saved media checkpoint target changed');
+  const content=await readNativeProductContent(page,{receipt:checkpoint.media,identity:assertIdentity,timeoutMs});
+  const basicSchedule=await stages.reconcileSavedStages(page,approved,checkpoint);
+  await assertIdentity(page);return {status:'saved-stages-reconciled',media:content,basicSchedule};
+ },finalCheck:{
   async get(page,p,c){
    bindingCheck(p,c);await assertIdentity(page);
    const mediaReceipt=receipt(c,'media'),seasonReceipt=seasonExcluded?null:receipt(c,'season');

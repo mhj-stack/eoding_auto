@@ -180,34 +180,70 @@ async function drawModalTable(page) {
     return {
       recordsDisplay: api.page.info().recordsDisplay,
       rows: document.querySelectorAll('#modal_table table tbody tr').length,
+      emptyRows: document.querySelectorAll('#modal_table table tbody tr:has(td.dataTables_empty)').length,
     };
   }, TIMEOUT);
-  if (!Number.isInteger(result.recordsDisplay) || result.recordsDisplay < 0 || result.recordsDisplay > 20 || result.rows !== result.recordsDisplay) fail('Unexpected image search result table');
+  const emptyPlaceholder = result.recordsDisplay === 0 && result.rows === 1 && result.emptyRows === 1;
+  if (!Number.isInteger(result.recordsDisplay) || result.recordsDisplay < 0 || result.recordsDisplay > 20 || (result.rows !== result.recordsDisplay && !emptyPlaceholder)) fail('Unexpected image search result table');
+}
+
+function validateImageQueries(approved, query, fallbackQueries) {
+  if (typeof query !== 'string' || !query || query !== query.trim()) fail('Invalid display image search query');
+  if (fallbackQueries !== undefined && (!Array.isArray(fallbackQueries) || fallbackQueries.length !== approved.length || fallbackQueries.some(value => typeof value !== 'string' || !value || value !== value.trim()))) fail('Invalid image fallback queries');
+}
+
+async function importExistingModalImages(page, approved, query, fallbackQueries) {
+  await (await uniqueVisible(page, '#content-modal', 'image modal')).waitFor({ state: 'visible', timeout: TIMEOUT });
+  const selectedRows = () => page.locator('#content-modal #selected_image_area .import-image').evaluateAll(rows => rows.map(row => ({ id: row.getAttribute('data-id'), src: row.getAttribute('src') })));
+  if ((await selectedRows()).length) fail('Image modal already contains selected rows');
+  await (await uniqueVisible(page, '#content-modal #id_title', 'image search field')).fill(query, { timeout: TIMEOUT });
+  await drawModalTable(page);
+  for (const [index, image] of approved.entries()) {
+    const selector = `#content-modal .select-row[data-id="${image.id}"]`;
+    if (await page.locator(selector).count() === 0 && fallbackQueries?.[index] && fallbackQueries[index] !== query) {
+      await (await uniqueVisible(page, '#content-modal #id_title', 'image search field')).fill(fallbackQueries[index], { timeout: TIMEOUT });
+      await drawModalTable(page);
+    }
+    if (await page.locator(selector).count() !== 1) fail('Approved image search result is missing or ambiguous');
+    const button = await uniqueVisible(page, selector, `image ${image.id} selection`);
+    if (await button.getAttribute('data-src') !== image.src) fail('Image selection source does not exactly match approval');
+    await button.click({ timeout: TIMEOUT });
+    if (!stateImagesEqual(await selectedRows(), approved.slice(0, index + 1))) fail('Image selection did not stick in exact approved order');
+  }
+  await (await uniqueVisible(page, '#content-modal #import-image-btn', 'image import control')).click({ timeout: TIMEOUT });
+  await page.locator('#content-modal').waitFor({ state: 'hidden', timeout: TIMEOUT });
 }
 
 /** Select existing exact image-library rows and import them into the unsaved homepage form. Never saves or uploads. */
-export async function prepareExistingDisplayImages(page, { images, companyId, query } = {}) {
+export async function prepareExistingDisplayImages(page, { images, companyId, query, fallbackQueries } = {}) {
   const approved = validateDisplayImages(images, companyId);
-  if (typeof query !== 'string' || !query || query !== query.trim()) fail('Invalid display image search query');
+  validateImageQueries(approved, query, fallbackQueries);
   const before = await readDisplayImageState(page);
   if (before.images.length) {
     if (!stateImagesEqual(before.images, approved)) fail('Cannot overwrite nonempty display images');
     return before;
   }
   await (await uniqueVisible(page, '#image_popup', 'image popup control')).click({ timeout: TIMEOUT });
-  await (await uniqueVisible(page, '#content-modal', 'image modal')).waitFor({ state: 'visible', timeout: TIMEOUT });
-  await (await uniqueVisible(page, '#content-modal #id_title', 'image search field')).fill(query, { timeout: TIMEOUT });
-  await drawModalTable(page);
-  for (const image of approved) {
-    const selector = `#content-modal .select-row[data-id="${image.id}"]`;
-    const button = await uniqueVisible(page, selector, `image ${image.id} selection`);
-    if (await button.getAttribute('data-src') !== image.src) fail('Image selection source does not exactly match approval');
-    await button.click({ timeout: TIMEOUT });
-    const selected = page.locator(`#content-modal #selected_image_area .import-image[data-id="${image.id}"]`);
-    if (await selected.count() !== 1 || await selected.getAttribute('src') !== image.src) fail('Image selection did not stick');
-  }
-  await (await uniqueVisible(page, '#content-modal #import-image-btn', 'image import control')).click({ timeout: TIMEOUT });
-  await page.locator('#content-modal').waitFor({ state: 'hidden', timeout: TIMEOUT });
+  await importExistingModalImages(page, approved, query, fallbackQueries);
   const after = await readDisplayImageState(page);
   return assertDisplayImageDelta(before, after, approved);
+}
+
+/** Attach one verified prior upload through the reference image picker. Never saves or uploads. */
+export async function prepareExistingReferenceImage(page, { control, receipt, companyId, query } = {}) {
+  const approved = validateDisplayImages([receipt], companyId);
+  validateImageQueries(approved, query);
+  if (!control || await control.count() !== 1 || !await control.isVisible() || !await control.evaluate(node => node.matches('#reference_body .control[data-type="4"]'))) fail('Invalid reference image control');
+  const rows = () => control.locator('.tr_image_list').evaluateAll(items => items.map(item => {
+    const pictures = item.querySelectorAll('img');
+    if (pictures.length !== 1) throw new Error('Malformed reference image row');
+    return { id: item.getAttribute('data-id'), src: pictures[0].getAttribute('src') };
+  }));
+  if ((await rows()).length) fail('Cannot overwrite nonempty reference images');
+  const button = control.locator('.add_reference_image');
+  if (await button.count() !== 1 || !await button.isVisible() || !await button.isEnabled()) fail('Reference image search control is missing or ambiguous');
+  await button.click({ timeout: TIMEOUT });
+  await importExistingModalImages(page, approved, query);
+  if (!stateImagesEqual(await rows(), approved)) fail('Reference image attachment differs from the exact approved receipt');
+  return approved[0];
 }

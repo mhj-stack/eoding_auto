@@ -23,8 +23,11 @@ function assertPrivateDataDir(dataDir) {
 export class ScheduleSessionBrowser extends EodingBrowser {
   constructor(options = {}) {
     const dataDir = assertPrivateDataDir(options.dataDir);
+    const restoreSession = options.restoreSession ?? false;
+    if (typeof restoreSession !== 'boolean') fail('restoreSession must be an explicit boolean');
     super({ ...options, dataDir });
     this.dataDir = dataDir;
+    this.restoreSession = restoreSession;
     this._scheduleSession = null;
   }
 
@@ -38,7 +41,10 @@ export class ScheduleSessionBrowser extends EodingBrowser {
       if (error.code !== 'EEXIST') throw error;
     });
     const context = await this.launcher.launchPersistentContext(path.join(this.dataDir, 'browser-profile'), {
-      headless: false, acceptDownloads: false, viewport: { width: 1360, height: 960 }, serviceWorkers: 'block'
+      headless: false, acceptDownloads: false, viewport: { width: 1360, height: 960 }, serviceWorkers: 'block',
+      // Ask Chromium itself to restore this dedicated profile. Never export or
+      // inject authentication state; omit Playwright's extra startup blank tab.
+      ...(this.restoreSession ? { args: ['--restore-last-session'], ignoreDefaultArgs: ['about:blank'] } : {})
     });
     context.setDefaultTimeout(10000);
     const pages = context.pages();

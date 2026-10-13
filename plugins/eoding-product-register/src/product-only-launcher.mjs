@@ -157,6 +157,7 @@ async function boundedBytes(response) {
 /** Credential-free HTTPS CDN re-read that proves the returned image remains in the approved tenant. */
 export async function verifyApprovedProductOnlyCdnImage({ receipt, source, companyId, fetchImpl = fetch } = {}) {
   if (!plain(receipt) || typeof receipt.src !== 'string' || !plain(source) || typeof fetchImpl !== 'function') fail('Upload receipt, source, and fetch implementation are required');
+  if (!['image/png', 'image/jpeg', 'image/webp'].includes(source.mimeType) || !/^[a-f0-9]{64}$/.test(source.sha256 ?? '')) fail('Approved image MIME and SHA-256 are required for CDN verification');
   const tenant = positiveId(companyId, 'companyId');
   const url = new URL(receipt.src);
   const prefix = `https://media.eoding.com/media/travelagent/${tenant}/imagecontent/`;
@@ -290,7 +291,13 @@ export async function readProductOnlyIdentity(page) {
     if (!label) fail('Observed ERP account name is missing');
     const cookies = (await page.context().cookies(ALLOWED_ORIGIN)).filter(cookie => cookie.httpOnly).map(cookie => ({ name: cookie.name, value: cookie.value, domain: cookie.domain, path: cookie.path })).sort((left, right) => (left.name + left.domain + left.path).localeCompare(right.name + right.domain + right.path));
     if (!cookies.length) fail('Approved ERP session has no HttpOnly identity cookie');
-    const companyIds = await page.locator('img').evaluateAll(nodes => [...new Set(nodes.map(node => /\/travelagent\/(\d+)\/erp_logo\//.exec(node.src)?.[1]).filter(Boolean))]);
+    const companyIds = await page.locator('img').evaluateAll(nodes => [...new Set(nodes.map(node => {
+      try {
+        const source = new URL(node.src);
+        if (source.origin !== 'https://media.eoding.com') return null;
+        return /^\/media\/travelagent\/(\d+)\/(?:erp_logo|logo)\//.exec(source.pathname)?.[1];
+      } catch { return null; }
+    }).filter(Boolean))]);
     if (companyIds.length !== 1) fail('Observed ERP company tenant is missing or ambiguous');
     const companyId = companyIds[0];
     return { companyId, identity: { accountName: label, accountKey: digest({ origin: ALLOWED_ORIGIN, label, declaredTenant: companyId }), sessionKey: digest(cookies) } };

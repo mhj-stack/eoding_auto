@@ -145,7 +145,7 @@ async function uploadReferenceImage(page,source,args,uploads){
   const outcome=await guardedPost(page,{key:`upload:${source.sha256}`,url:args.target.endpoints.upload,expected:{fields:[['alt',source.alt]],file:{field:'pc-image',name:source.name,mimeType:source.mimeType,bytes:source.bytes}},click:()=>modal.locator('#save-image').click(),...args});
   if(outcome.status!=='saved')return outcome;
   let raw;try{raw=await outcome.response.json()}catch{return {status:'needs-reconciliation',key:outcome.key,url:outcome.url,forwarded:1,guardError:'Upload response was not JSON',responseStatus:outcome.response.status()}}
-  const receipt=assertReceipt(raw,source,args.tenant);const evidence=await args.verifyUploadedImage({receipt:clone(receipt),source:{name:source.name,sha256:source.sha256,alt:source.alt},target:clone(args.target)});
+  const receipt=assertReceipt(raw,source,args.tenant);const evidence=await args.verifyUploadedImage({receipt:clone(receipt),source:{name:source.name,mimeType:source.mimeType,sha256:source.sha256,alt:source.alt},target:clone(args.target)});
   if(!evidence||evidence.sha256!==source.sha256||evidence.tenantId!==args.tenant.companyId||evidence.src!==receipt.src)fail('Uploaded image evidence mismatch');
   const linked=page.locator(`#reference_body .tr_image_list[data-id="${receipt.id}"] img`);if(await linked.count()!==1||await linked.getAttribute('src')!==receipt.src)fail('Uploaded image was not linked to reference content');uploads.push(receipt);return {status:'saved',key:outcome.key};
 }

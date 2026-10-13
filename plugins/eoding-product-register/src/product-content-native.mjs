@@ -1,7 +1,7 @@
 import { prepareReferencePicker } from './reference-picker.mjs';
 import {isDeepStrictEqual as same} from 'node:util';
 import {createHash} from 'node:crypto';
-import {parseDisplayMultipart,readDisplayImageState,prepareExistingDisplayImages,validateDisplayImages} from './display-image.mjs';
+import {parseDisplayMultipart,readDisplayImageState,prepareExistingDisplayImages,prepareExistingReferenceImage,validateDisplayImages} from './display-image.mjs';
 const copy=x=>structuredClone(x);
 const fail=message=>{throw Error(message)};
 const strip=body=>Array.isArray(body)?body: Object.fromEntries(Object.entries(body).filter(([k])=>k!=='csrfmiddlewaretoken'));
@@ -29,6 +29,16 @@ function csrfBody(fields){
   return csrfValue(tokens[0][1]);
 }
 function sameCsrfChannels(captured,forwarded){return same(captured,forwarded);}
+export async function prepareNativeReferenceText(page,elements,picker,timeoutMs=15000){
+  if(await page.locator('#reference_body .control[data-type]').count())fail('Native reference is not empty');
+  for(const element of elements){
+    const type=String(element.type),before=await page.locator('#reference_body .control[data-type]').count();
+    await picker.choose(type);await page.locator('#add_reference_element').click();
+    await page.waitForFunction(({before,type})=>{const rows=document.querySelectorAll('#reference_body .control[data-type]');return rows.length===before+1&&rows[rows.length-1].dataset.type===type;},{before,type},{timeout:timeoutMs});
+    const input=page.locator('#reference_body .control[data-type]').last().locator(type==='1'?'textarea':'input[type=text]:not([readonly]):not([disabled])');
+    if(await input.count()!==1)fail('Ambiguous native reference text field');await input.fill(element.text);
+  }
+}
 function expectedDetail(before,detail){
   const out=copy(before);
   for(const key of ['1','2','3','4'])if(before[key]?.etc!=='[]')fail('Existing native detail rows require reconciliation');
@@ -55,6 +65,9 @@ async function payload(req,upload=false){
       if(Object.hasOwn(body,key))fail('Duplicate upload field');
       body[key]=typeof value==='string'?value:{name:value.name,mimeType:value.type,size:value.size,sha256:createHash('sha256').update(Buffer.from(await value.arrayBuffer())).digest('hex')};
     }
+    // The native ERP serializes an absent mobile image as this exact string.
+    // Normalize only after duplicate validation; files and other values stay guarded.
+    if(body['mobile-image']==='null')delete body['mobile-image'];
     return {body,csrf:csrfChannels(req,csrfBody(fields))};
   }
   const fields=parseDisplayMultipart(ct,req.postDataBuffer()),seen=new Set();for(const [name] of fields){if(name==='csrfmiddlewaretoken')continue;if(seen.has(name))fail('Duplicate native field');seen.add(name);}
@@ -69,6 +82,14 @@ export async function applyNativeProductContent(page,args){
   const displayUploads=uploads=>selectedIndexes===undefined?uploads:selectedIndexes.map(i=>uploads[i]);
   if(useUploads&&(!args.reference.images.length||args.display.images.length))fail('Display upload sources must be exclusive and nonempty');
   if(args.reference.images.length>20)fail('At most 20 native images supported');
+  let reconciledUpload;
+  if(args.reconciledUploads!==undefined){
+    const entries=args.reconciledUploads;
+    if(!Array.isArray(entries)||entries.length!==1||!entries[0]||typeof entries[0]!=='object'||Array.isArray(entries[0])||Object.keys(entries[0]).sort().join(',')!=='receipt,sourceSha256'||typeof entries[0].sourceSha256!=='string'||!(/^[a-f0-9]{64}$/).test(entries[0].sourceSha256))fail('Reconciled uploads must contain exactly one bound first upload');
+    const source=args.reference.images[0];
+    if(!source||source.sha256!==entries[0].sourceSha256||args.reference.images.filter(image=>image.sha256===entries[0].sourceSha256).length!==1)fail('Reconciled upload must match only the first approved source');
+    reconciledUpload={sourceSha256:entries[0].sourceSha256,receipt:validateDisplayImages([entries[0].receipt],tenant.companyId)[0]};
+  }
   const approvedImages=args.display.images.length?validateDisplayImages(args.display.images,tenant.companyId):[];
   const completed=[],uploads=[];let pending=null,failed=false,forwarded=0,cdp;
   const assertIdentity=async()=>{if(page.url().split('#')[0]!==target.pageUrl.split('#')[0])fail('Native content target changed');await identity(page,copy(target));if(page.url().split('#')[0]!==target.pageUrl.split('#')[0])fail('Native content target changed');};
@@ -84,7 +105,7 @@ export async function applyNativeProductContent(page,args){
     }catch(e){failed=true;await route.abort().catch(()=>{});p.reject(e);}
   };
   await page.context().route('**/*',guard);
-  const tab=async key=>{await page.waitForLoadState('load',{timeout:timeoutMs});const link=page.locator(`a[href="#${key}"]`);if(await link.count()===1)await link.click();await assertIdentity();};
+  const tab=async key=>{await page.waitForLoadState('load',{timeout:timeoutMs});const link=page.locator(`a[href="#${key}"]`);if(await link.count()===1)await link.click();await page.locator({base:'#homepage_post',detail:'#include',productreference:'#reference_form'}[key]).waitFor({state:'visible',timeout:timeoutMs});await assertIdentity();};
   const capture=async(key,url,selector,{expected,forward=false,csrf=null}={})=>{
     if(failed)fail('Native content blocked after an earlier failure');await assertIdentity();let timer;
     const packet=new Promise((resolve,reject)=>{timer=setTimeout(()=>reject(Error('Native payload capture timed out')),timeoutMs);pending={key,url,expected,forward,csrf,used:false,resolve,reject};});packet.catch(()=>{});
@@ -92,12 +113,30 @@ export async function applyNativeProductContent(page,args){
     try{await page.locator(selector).click({timeout:timeoutMs});const data=await packet;if(failed)fail('Unexpected ERP mutation blocked');if(response){const r=await response;if(!r?.ok())fail('Native save outcome unknown');completed.push(key);data.response=r;}return data;}
     finally{clearTimeout(timer);pending=null;}
   };
+  const save=async(key,url,selector,expected)=>{
+    // Tabs and upload modals may carry independently masked CSRF values/channels.
+    // Probe the final approved payload in this exact current control, then bind
+    // its single forwarded request to that immediately preceding capture.
+    const prepared=await capture(key+'-prepared',url,selector,{expected});
+    return capture(key,url,selector,{expected,forward:true,csrf:prepared.csrf});
+  };
   try{
     cdp=await page.context().newCDPSession(page);await cdp.send('Network.enable');await cdp.send('Network.setCacheDisabled',{cacheDisabled:true});await cdp.send('Network.setBypassServiceWorker',{bypass:true});
+    if(reconciledUpload){
+      await assertIdentity();const source=args.reference.images[0],receipt=reconciledUpload.receipt;
+      const proof=await args.verifyUploadedImage({receipt:copy(receipt),source:{name:source.name,mimeType:source.mimeType,sha256:source.sha256,alt:source.alt},target:copy(target)});
+      if(proof?.sha256!==source.sha256||proof.tenantId!==tenant.companyId||proof.src!==receipt.src)fail('Reconciled uploaded image evidence mismatch');
+    }
     // Capture untouched baselines without sending any request to ERP.
     await tab('base');const base=await capture('display-baseline',target.endpoints.display,target.controls.displaySave);
     const imageBaseline=(approvedImages.length||useUploads)?await readDisplayImageState(page):null;if(imageBaseline?.images.length)fail('Native display image baseline is not empty');
-    await tab('detail');const detailBase=await capture('detail-baseline',target.endpoints.detail,target.controls.detailSave);const detailExpected=expectedDetail(detailBase.body,args.detail);
+    await tab('detail');const detailBase=await capture('detail-baseline',target.endpoints.detail,target.controls.detailSave);const detailExpected=args.reconciledDetail?copy(args.reconciledDetail):expectedDetail(detailBase.body,args.detail);
+    if(args.reconciledDetail){
+      if(!same(detailBase.body,detailExpected))fail('Reconciled detail changed before media continuation');
+      const blank=copy(detailExpected);for(const key of ['1','2','3','4'])blank[key].etc='[]';for(const key of ['1','2'])blank[key].etc2='';
+      if(!same(expectedDetail(blank,args.detail),detailExpected))fail('Reconciled detail differs from the approved content');
+      await record({phase:'detail-reconciled',target:copy(target),payload:copy(detailExpected)});
+    }
     await tab('productreference');const referenceBase=await capture('reference-baseline',target.endpoints.reference,target.controls.referenceSave);let referenceExpected=expectedReference(referenceBase.body,args.reference);
     let referencePicker;
     if(args.reference.elements.length||args.reference.images.length){
@@ -110,27 +149,35 @@ export async function applyNativeProductContent(page,args){
     const displayExpected={...base.body,...args.display.fields};if('product_description' in args.display.fields)displayExpected.product_description=args.display.fields.product_description.replace(/\r?\n/g,'\r\n');
     if('badge_list' in displayExpected)displayExpected.badge_list=JSON.stringify(['badge1','badge2','badge3'].map(k=>displayExpected[k]?.trim()??'').filter(Boolean));
     if(approvedImages.length){await prepareExistingDisplayImages(page,{images:approvedImages,companyId:tenant.companyId,query:args.display.imageQuery});displayExpected.image_sort=JSON.stringify({images:approvedImages.map(x=>x.id)});}
-    if(!useUploads)await capture('display',target.endpoints.display,target.controls.displaySave,{expected:displayExpected,forward:true,csrf:base.csrf});
+    if(!useUploads)await save('display',target.endpoints.display,target.controls.displaySave,displayExpected);
+    if(!args.reconciledDetail){
     await tab('detail');for(const id of ['include','exclude','information','main-point']){const rows=args.detail[id==='main-point'?'mainPoints':id];if(await page.locator(`#${id} tbody input`).count())fail('Native detail is not empty');for(const value of rows){await page.locator(`button.row-add[data-target="${id}"]`).click();const inputs=page.locator(`#${id} tbody tr`).last().locator('input');if(id==='include'||id==='exclude'){if(await inputs.count()!==2)fail('Unexpected native detail row');await inputs.nth(0).fill(value.name);await inputs.nth(1).fill(value.description);}else await inputs.fill(value);}}
     for(const key of ['include','exclude'])if(args.detail[key+'Note']!==undefined)await page.locator(`#${key} textarea`).fill(args.detail[key+'Note']);await page.locator('#id_real_shopping_count').fill(args.detail.shoppingCount);
-    await capture('detail',target.endpoints.detail,target.controls.detailSave,{expected:detailExpected,forward:true,csrf:detailBase.csrf});
-    await tab('productreference');if(await page.locator('#reference_body .control[data-type]').count())fail('Native reference is not empty');for(const element of args.reference.elements){await referencePicker.choose(String(element.type));await page.locator('#add_reference_element').click();await page.locator('#reference_body .control[data-type]').last().locator(String(element.type)==='1'?'textarea':'input[type=text]').first().fill(element.text);}
+    await save('detail',target.endpoints.detail,target.controls.detailSave,detailExpected);
+    }
+    await tab('productreference');await prepareNativeReferenceText(page,args.reference.elements,referencePicker,timeoutMs);
     if(args.reference.images.length){
-      await referencePicker.choose('4');await page.locator('#add_reference_element').click();const control=page.locator('#reference_body .control[data-type="4"]').last();
+      await referencePicker.choose('4');await page.locator('#add_reference_element').click();const control=page.locator('#reference_body .control[data-type="4"]').last();await control.waitFor({state:'visible',timeout:timeoutMs});
       for(const source of args.reference.images){
+        if(reconciledUpload?.sourceSha256===source.sha256){
+          const receipt=await prepareExistingReferenceImage(page,{control,receipt:reconciledUpload.receipt,companyId:tenant.companyId,query:source.name});
+          await record({phase:'upload-reconciled',receipt:copy(receipt),source:{name:source.name,mimeType:source.mimeType,sha256:source.sha256},target:copy(target)});
+          uploads.push(receipt);continue;
+        }
         await control.locator('.add_image_popup').click();const modal=page.locator('#content-modal').filter({visible:true});await modal.waitFor({state:'visible'});await modal.locator('#id_alt').fill(source.alt);await modal.locator('.image_upload_container[data-type="pc"] input[type=file]').setInputFiles({name:source.name,mimeType:source.mimeType,buffer:source.bytes});
         const expected={alt:source.alt,'pc-image':{name:source.name,mimeType:source.mimeType,size:source.bytes.length,sha256:source.sha256}};
-        const outcome=await capture(`upload:${source.sha256}`,target.endpoints.upload,'#content-modal #save-image',{expected,forward:true,csrf:base.csrf});
+        const outcome=await save(`upload:${source.sha256}`,target.endpoints.upload,'#content-modal #save-image',expected);
         const raw=await outcome.response.json();const receipt=validateDisplayImages([{id:String(raw.id),src:raw.src}],tenant.companyId)[0];
         await record({phase:'upload-receipt',receipt,source:{name:source.name,sha256:source.sha256},target:copy(target)});
-        const proof=await args.verifyUploadedImage({receipt:copy(receipt),source:{name:source.name,sha256:source.sha256,alt:source.alt},target:copy(target)});
+        if(uploads.some(image=>image.id===receipt.id||image.src===receipt.src))fail('Native upload receipt duplicates an earlier image');
+        const proof=await args.verifyUploadedImage({receipt:copy(receipt),source:{name:source.name,mimeType:source.mimeType,sha256:source.sha256,alt:source.alt},target:copy(target)});
         if(proof?.sha256!==source.sha256||proof.tenantId!==tenant.companyId||proof.src!==receipt.src)fail('Native uploaded image evidence mismatch');
         const picture=control.locator(`.tr_image_list[data-id="${receipt.id}"] img`);await picture.waitFor({state:'visible',timeout:timeoutMs});if(await picture.count()!==1||await picture.getAttribute('src')!==receipt.src)fail('Native upload attached to wrong control');await modal.waitFor({state:'hidden',timeout:timeoutMs});uploads.push(receipt);
       }
       referenceExpected=expectedReference(referenceBase.body,args.reference,uploads);
     }
-    await capture('reference',target.endpoints.reference,target.controls.referenceSave,{expected:referenceExpected,forward:true,csrf:referenceBase.csrf});
-    if(useUploads){await tab('base');for(const [name,value] of Object.entries(args.display.fields))await page.locator(`#homepage_post [name="${name}"]`).fill(value);await prepareExistingDisplayImages(page,{images:displayUploads(uploads),companyId:tenant.companyId,query:args.display.imageQuery});displayExpected.image_sort=JSON.stringify({images:displayUploads(uploads).map(x=>x.id)});await capture('display',target.endpoints.display,target.controls.displaySave,{expected:displayExpected,forward:true,csrf:base.csrf});}
+    await save('reference',target.endpoints.reference,target.controls.referenceSave,referenceExpected);
+    if(useUploads){await tab('base');for(const [name,value] of Object.entries(args.display.fields))await page.locator(`#homepage_post [name="${name}"]`).fill(value);await prepareExistingDisplayImages(page,{images:displayUploads(uploads),companyId:tenant.companyId,query:args.display.imageQuery,fallbackQueries:displayUploads(args.reference.images).map(source=>source.name)});displayExpected.image_sort=JSON.stringify({images:displayUploads(uploads).map(x=>x.id)});await save('display',target.endpoints.display,target.controls.displaySave,displayExpected);}
     const expected={target:copy(target),display:copy(args.display),detail:copy(args.detail),reference:copy(args.reference),uploads,payloads:{display:displayExpected,detail:detailExpected,reference:referenceExpected}};
     // Reload from the server, then capture native serialization with every POST aborted.
     // This verifies persisted values independently of the filled-in draft and callback.

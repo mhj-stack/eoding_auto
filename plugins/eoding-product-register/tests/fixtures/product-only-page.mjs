@@ -64,8 +64,12 @@ window.saveSeason=()=>{for(const input of season_frm.querySelectorAll('[name$="_
 </script>`;
 }
 
-function pageHtml(state) {
+function pageHtml(state, dayTitleInput = true) {
   let html = chainPage(state.product, state.schedule, state.days);
+  if (!dayTitleInput) html = html
+    .replace('<div id="schedule_detail_area"><input class="input_day_title"></div>', '<div id="schedule_detail_area"><div class="step"><div class="head">1 일차</div></div></div>')
+    .replace("document.querySelector('.input_day_title').value='';", "document.querySelector('#schedule_detail_area .head').textContent=n+' 일차';")
+    .replace("const title=document.querySelector('.input_day_title').value,meal_list={title};", "const meal_list={};");
   html = html.replace('<button id="save-master-product" onclick="saveDay()">일차 저장</button>', '<button id="save-master-product" type="button">저장</button>');
   return html + nativeMedia(state.content) + seasonShell(state, state.product) + `<script>
 const inheritedSaveDay=window.saveDay;window.saveDay=()=>inheritedSaveDay();
@@ -85,7 +89,7 @@ function savedSeason(state, id) {
  * Install every product-only endpoint on an existing BrowserContext. No request can reach a network.
  * `writes` records only forwarded synthetic persistence; basic creation is deliberately labelled UI-only.
  */
-export async function installProductOnlyFixture(context, { product, dropMediaPersistence = false } = {}) {
+export async function installProductOnlyFixture(context, { product, dropMediaPersistence = false, dayTitleInput = true } = {}) {
   if (!context || typeof context.route !== 'function') throw new TypeError('A BrowserContext is required');
   const state = { product: productShape(product), addServed: false, basicRecorded: false, schedule: null, days: {}, seasons: [], content: {}, unexpected: [], writes: [] };
   const writes = state.writes;
@@ -100,7 +104,7 @@ export async function installProductOnlyFixture(context, { product, dropMediaPer
     if (url.origin !== origin) return route.abort();
     if(request.method()==='GET'&&url.pathname===`/tour/master_product_schedule/${productId}/update/`)return route.fulfill({contentType:'text/html',body:`<table><tbody id="schedule_list_table">${state.schedule?scheduleRow(state.schedule):''}</tbody></table>`});
     if (request.method() === 'GET' && url.href === addUrl) { state.addServed = true; return route.fulfill({ contentType: 'text/html', body: basicFixture.replace("/tour/master_product/detail/812345/", `/tour/master_product/${productId}/change/`) + '<script>window.navigate=true</script>' }); }
-    if (request.method() === 'GET' && url.pathname === detailUrl.pathname) { if (!state.basicRecorded && state.addServed) { state.basicRecorded = true; writes.push({ kind: 'basic-simulated-ui', url: addUrl }); } return route.fulfill({ contentType: 'text/html', body: pageHtml(state) }); }
+    if (request.method() === 'GET' && url.pathname === detailUrl.pathname) { if (!state.basicRecorded && state.addServed) { state.basicRecorded = true; writes.push({ kind: 'basic-simulated-ui', url: addUrl }); } return route.fulfill({ contentType: 'text/html', body: pageHtml(state, dayTitleInput) }); }
     if (request.method() === 'GET' && url.pathname === scheduleDetailPath) return route.fulfill({ contentType: 'application/json', body: JSON.stringify(serverDetail(state.product, state.schedule ?? { title: 'Fixture schedule' }, state.days)) });
     if (request.method() === 'GET' && url.pathname === '/tour/master_product_season/' && url.search === `?product_id=${productId}&init_flag=False`) return route.fulfill({ contentType: 'text/html', body: seasonList(state) });
     const seasonDetail = /^\/tour\/master_product_season\/([1-9]\d*)\/change\/$/.exec(url.pathname);

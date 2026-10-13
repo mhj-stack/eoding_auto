@@ -1,10 +1,13 @@
-const selector = '#reference_body .cont_box.reference_element select';
-const fail = () => { throw new Error('Unsupported native reference picker; no content writes forwarded'); };
+// The element-type picker has the image option (4). Text rows also contain
+// color (0..3) and bold (0..1) selects inside reference_element containers.
+const selector = '#reference_body .cont_box.reference_element select:has(option[value="4"])';
+const fail = () => { throw new Error('Unsupported native reference picker'); };
 
 /** Operate either the visible native select or its exact Materialize UI pair.
  * The same ERP uses Materialize for the basic status field. Unknown widgets stay blocked.
  */
 export async function prepareReferencePicker(page, types, timeout = 5000) {
+  const selector = '#reference_body .cont_box.reference_element select:has(option[value="4"])';
   const select = page.locator(selector);
   if (await select.count() !== 1 || !await select.isEnabled()) fail();
   const options = await select.locator('option').evaluateAll(nodes => nodes.map(node => ({
@@ -45,12 +48,32 @@ export async function prepareReferencePicker(page, types, timeout = 5000) {
     }
   } finally {
     await input.press('Escape', { timeout });
+    // Some ERP Materialize builds leave this menu open after Escape. Close only
+    // the widget whose trigger and menu were verified above; never select a value.
+    try { await menu.waitFor({ state: 'hidden', timeout: Math.min(timeout, 350) }); }
+    catch {
+      const closed = await input.evaluate((element, target) => {
+        const getInstance = window.M?.Dropdown?.getInstance;
+        if (typeof getInstance !== 'function') return false;
+        const instance = getInstance(element);
+        if (!instance || instance.el !== element || instance.dropdownEl !== document.getElementById(target) || typeof instance.close !== 'function') return false;
+        instance.close();
+        return true;
+      }, target);
+      if (!closed) fail();
+    }
     await menu.waitFor({ state: 'hidden', timeout });
   }
   if (await select.inputValue() !== previous) fail();
   return {
     async choose(type) {
       if (!labels.has(type)) fail();
+      // ERP tab GETs and added rows may rebuild Materialize with a new menu ID.
+      // Revalidate the replacement widget instead of using the stale binding.
+      if (await input.count() === 1 && await input.getAttribute('data-target') !== target) {
+        const replacement = await prepareReferencePicker(page, types, timeout);
+        return replacement.choose(type);
+      }
       await check();
       await input.click({ timeout });
       await menu.waitFor({ state: 'visible', timeout });

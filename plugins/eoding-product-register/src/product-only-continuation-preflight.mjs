@@ -41,9 +41,9 @@ function referenceEmpty(value) {
   return same(value, observed) || same(value, fixture);
 }
 function displayEmpty(value) { return exact(value, emptyDisplay) || exact(value, fixtureDisplay); }
-function assertEmptyPayload(key, body) {
+function assertEmptyPayload(key, body, reconciledDetail) {
   if (key === 'display') { if (!displayEmpty(body)) fail('display native serialization is not an approved empty default'); return; }
-  if (key === 'detail') { if (!detailEmpty(body)) fail('detail native serialization is not an approved empty default'); return; }
+  if (key === 'detail') { if (reconciledDetail ? !same(body,reconciledDetail) : !detailEmpty(body)) fail('detail native serialization is not an approved empty default'); return; }
   if (!referenceEmpty(body)) fail('reference native serialization is not an approved empty default');
 }
 function parsePacket(key, request) {
@@ -86,7 +86,7 @@ async function seasonList(page, id, target, timeoutMs) {
 }
 
 /** Read-only, native-save preflight for continuing an otherwise-empty existing product. */
-export async function verifyContinuationPreflight({ page, plan, receipt, identity, timeoutMs = 15000 } = {}) {
+export async function verifyContinuationPreflight({ page, plan, receipt, identity, timeoutMs = 15000, reconciledDetail } = {}) {
   if (!page || typeof page.context !== 'function' || !plan?.identity || !receipt || typeof identity !== 'function' || !Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 30000) fail('valid page, plan, receipt, identity, and timeout are required');
   const id = productId(receipt.productId), target = `${ALLOWED_ORIGIN}/tour/master_product/${id}/change/`, origin = new URL(target).origin;
   const endpoints = Object.freeze({ display:`${origin}/tour/master_product/homepage/${id}/`, detail:`${origin}/tour/master_product_detail/${id}/change/`, reference:`${origin}/tour/master_product_reference/${id}/change/` });
@@ -99,7 +99,7 @@ export async function verifyContinuationPreflight({ page, plan, receipt, identit
     const expected = pending && !pending.used && method === 'POST' && request.url() === endpoints[pending.key];
     if (!expected) { unexpected = true; return route.abort(); }
     pending.used = true;
-    try { const body = parsePacket(pending.key, request); assertEmptyPayload(pending.key, body); await route.abort(); pending.resolve(); }
+    try { const body = parsePacket(pending.key, request); assertEmptyPayload(pending.key, body, reconciledDetail); await route.abort(); pending.resolve(); }
     catch (error) { await route.abort().catch(() => {}); pending.reject(error); }
   };
   await context.route('**/*', guard);
@@ -116,6 +116,11 @@ export async function verifyContinuationPreflight({ page, plan, receipt, identit
     for (const [key, tab] of [['display','base'], ['detail','detail'], ['reference','productreference']]) {
       const link = page.locator(`a[href="#${tab}"]`); if (await link.count() !== 1) fail(`native ${key} tab is unavailable`);
       await link.click({ timeout:timeoutMs });
+      // Live tabs replace their form asynchronously. A visible shared Save
+      // button alone does not prove that it now belongs to the selected tab.
+      const form = page.locator({ display:'#homepage_post', detail:'#include', reference:'#reference_form' }[key]);
+      await form.waitFor({ state:'visible', timeout:timeoutMs });
+      if (await form.count() !== 1) fail(`native ${key} form is ambiguous`);
       const control = page.locator('#save-master-product'); if (await control.count() !== 1) fail('native save control is unavailable');
       let timer;
       const packet = new Promise((resolve, reject) => { timer = setTimeout(() => reject(new Error('native save capture timed out')), timeoutMs); pending = { key, used:false, resolve, reject }; });

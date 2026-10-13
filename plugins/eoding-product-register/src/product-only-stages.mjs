@@ -5,6 +5,7 @@ import {validateProductImport} from './product-import-scope.mjs';
 import {ScheduleDayDraft} from './schedule-day.mjs';
 import {readScheduleList} from './schedule-read.mjs';
 import {readScheduleDetail,verifyPlainDayPersistence} from './schedule-detail-read.mjs';
+import {digest} from './core.mjs';
 const copy=x=>structuredClone(x);
 const fail=m=>{throw Error(m)};
 const id=x=>typeof x==='string'&&/^[1-9]\d{0,9}$/.test(x);
@@ -93,7 +94,65 @@ export function createProductOnlyStageAdapters({identity,authorizeWrite,record,b
    await currentIdentity(page,state.plan);state.verified=true;return true;
   }
  });
- return {basic:stage('basic'),shell:stage('shell'),day:stage('day'),
+  return {basic:stage('basic'),shell:stage('shell'),day:stage('day'),
+   // Read-only recovery: durable receipts alone cannot mark a stage verified.
+   // Reconcile every saved day against the approved product before seeding only
+   // the dependency state used by final readback. No saved stage can run again.
+   async reconcileSavedStages(page,plan,checkpoint){
+    const checked=preflight(plan);if(!checked.canExecute)fail(checked.blockers.join('; '));
+    if(!same(plan.target,{mode:'NEW'})||!same(createProductOnlyApprovalBinding(plan),plan.approvalBinding))fail('Recovery plan binding changed');
+    if(binding||[...states.keys()].some(key=>key!=='basic'))fail('Saved stage reconciliation requires an unused adapter');
+    const {basic,shell,days,dayPrepared,shellBefore}=copy(checkpoint??{});
+    if(!basic||!same(states.get('basic')?.receipt,basic)||!shell||shell.status!=='schedule-saved'||shell.productId!==basic.productId||!id(String(shell.scheduleId))||!same(shell.fields,{title:plan.shell.title,nights:plan.product.nights,days:plan.product.days})||!Array.isArray(days)||days.length!==plan.itinerary.length||!shellBefore||String(shellBefore.productId)!==String(basic.productId)||!same(shellBefore.schedules,[]))fail('Saved checkpoint target or original empty schedule baseline changed');
+    const nativeBasic={...basic,productId:String(basic.productId)},nativeShell={...shell,productId:String(shell.productId),scheduleId:String(shell.scheduleId)};
+    const nativeDays=days.map((day,index)=>{
+     if(day?.day!==index+1||day.productId!==basic.productId||day.scheduleId!==shell.scheduleId||day.status!=='plain-day-persisted'||day.guardedPosts!==1||!id(day.detailId))fail('Saved day receipt changed');
+     return {...day,productId:String(day.productId),scheduleId:String(day.scheduleId)};
+    });
+    if(!Array.isArray(dayPrepared)||dayPrepared.length!==days.length)fail('Saved day preparation coverage changed');
+    const {productId:ignoredProductId,...expectedBasic}=nativeBasic,mealTypes=new Map([['불포함','16'],['호텔식','2'],['한식','5'],['현지식','3']]);
+    for(const [index,prepared]of dayPrepared.entries()){
+     const approved=plan.itinerary[index],expected=prepared?.expected,before=prepared?.before;
+     if(!expected||!before||expected.day!==approved.day)fail('Saved day preparation coverage differs from approval');
+     if(![expectedBasic.url,expectedBasic.url+'#schedule'].includes(expected.basic?.url)||!same({...expected.basic,url:expectedBasic.url},expectedBasic)||!same(expected.hotelIds,[]))fail('Saved day private basic or hotel preparation differs from approval');
+     if(!same(expected.target,{productId:nativeBasic.productId,masterCode:basic.masterCode,title:plan.product.title,account:plan.identity.accountName,scheduleId:nativeShell.scheduleId,scheduleCode:before.schedule?.code,scheduleTitle:shell.fields.title}))fail('Saved day prepared target differs from approval');
+     if(before.productId!==nativeBasic.productId||before.scheduleId!==nativeShell.scheduleId||before.schedule?.title!==shell.fields.title||before.schedule?.days!==plan.product.days||before.schedule?.nights!==plan.product.nights)fail('Saved day prepared schedule differs from approval');
+     if(!same(expected.details,[{type:'7',newStep:true,title:approved.title,short:'',description:approved.description}])||expected.title!==null&&expected.title!==approved.title)fail('Saved day prepared content differs from approval');
+     if(!same(Object.keys(expected.meals??{}).sort(),['breakfast','dinner','lunch']))fail('Saved native meal preparation changed');
+     for(const kind of ['breakfast','lunch','dinner']){
+      const meal=expected.meals[kind],source=approved.meals[kind];
+      if(!same(Object.keys(meal??{}).sort(),['text','type'])||!id(meal.type)||(meal.type==='17'?meal.text!==source:meal.text!==''||mealTypes.get(source)!==meal.type))fail('Saved native meal differs from approval');
+     }
+    }
+    if(dayPrepared[0].before.tree?.length!==days.length||dayPrepared[0].before.contentsFingerprint!==digest([])||dayPrepared[0].before.imagesFingerprint!==digest([]))fail('Saved initial itinerary baseline is not empty');
+    const target={productId:nativeBasic.productId,masterCode:basic.masterCode,scheduleId:nativeShell.scheduleId},owner=page.context();
+    const guard=r=>['GET','HEAD'].includes(r.request().method())?r.fallback():r.abort();await owner.route('**/*',guard);
+    let cdp;
+    try{
+     await currentIdentity(page,plan);cdp=await owner.newCDPSession(page);await cdp.send('Network.enable');await cdp.send('Network.setCacheDisabled',{cacheDisabled:true});await cdp.send('Network.setBypassServiceWorker',{bypass:true});
+     const url=`https://basecamp.team/tour/master_product/${target.productId}/change/`,response=await page.goto(url,{waitUntil:'domcontentloaded'});
+     if(response?.status()!==200||response.url()!==url||response.fromServiceWorker())fail('Saved basic independent GET failed');
+     const persisted=await low.basic.read(page),{productId,...expected}=nativeBasic;
+     if(!same(persisted,expected))fail('Saved basic differs from approved receipt');
+     const list=await readScheduleList(page,{productId:target.productId});
+     if(!same(list.schedules,[{scheduleId:target.scheduleId,...shell.fields}]))fail('Saved schedule membership changed');
+     const detailBefore=await readScheduleDetail(page,{productId:target.productId,scheduleId:target.scheduleId});
+     // Reuse the exact persisted native contract from each historical save.
+     // Some ERP layouts have no day-title input: their reviewed title is null,
+     // while the custom detail title still contains the approved source title.
+     for(const [index,prepared]of dayPrepared.entries()){
+      const p=prepared.expected,after=dayPrepared[index+1]?.before??detailBefore;
+      const proof=verifyPlainDayPersistence(prepared.before,after,{day:p.day,title:p.details[0].title,dayTitle:p.title??'',description:p.details[0].description,meals:Object.fromEntries(Object.entries(p.meals).map(([kind,meal])=>[kind,{type:Number(meal.type),text:meal.text}]))});
+      if(proof.detailId!==nativeDays[index].detailId)fail('Saved day independent receipt ID changed');
+     }
+     const detail=await readScheduleDetail(page,{productId:target.productId,scheduleId:target.scheduleId});
+     if(!same(detail,detailBefore))fail('Saved itinerary changed during reconciliation');
+     await currentIdentity(page,plan);
+     states.set('shell',{verified:true,native:nativeShell,receipt:shell,prepared:{before:copy(shellBefore)}});
+     for(const [index,receipt]of days.entries())states.set(`day:${receipt.day}`,{verified:true,native:nativeDays[index],receipt,after:copy(detail)});
+     return {status:'saved-basic-schedule-reconciled',basic:persisted,list,detail};
+    }finally{await owner.unroute('**/*',guard);await cdp?.detach().catch(()=>{});}
+   },
   async readFinal(page,plan,context){
    check(plan,context);await currentIdentity(page,plan);
    const basic=dependency(context,'basic'),shell=dependency(context,'shell');
