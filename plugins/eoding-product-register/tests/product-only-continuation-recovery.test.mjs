@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -81,7 +81,9 @@ function savedDetail() {
   return value;
 }
 async function recoveryFixture(t, receipt = { productId:812345, masterCode:'CJU-SYNTHETIC' }) {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'product-only-recovery-'));
+  // Windows runners may expose TEMP through a short-name or junction alias.
+  // Historical fixtures must use the same canonical paths as real journals.
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'product-only-recovery-')));
   t.after(() => rm(root, { recursive:true, force:true }));
   const imagePath = path.join(root, 'fixture.png'); await writeFile(imagePath, png);
   const value = plan(imagePath), original = await originalEvidence(root, value, receipt);

@@ -82,12 +82,17 @@ async function fixtureServer(t) {
     } else res.writeHead(404).end();
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
-  return { origin: `http://127.0.0.1:${server.address().port}`, requests };
+  const port = server.address().port;
+  const setOnline = async online => {
+    if (online && !server.listening) await new Promise(resolve => server.listen(port, '127.0.0.1', resolve));
+    if (!online && server.listening) await new Promise(resolve => { server.closeAllConnections(); server.close(resolve); });
+  };
+  t.after(() => setOnline(false));
+  return { origin: `http://127.0.0.1:${port}`, requests, setOnline };
 }
 
 for (const [restoreSession, offlineRestore] of [[false, false], [true, false], [true, true]]) test(`Chromium ${restoreSession ? 'restores' : 'does not restore'} a session-only fixture login${offlineRestore ? ' after an offline startup' : ''} without exporting authentication state`, { timeout: 60000 }, async t => {
-  const root = await temporaryRoot(t), { origin, requests } = await fixtureServer(t);
+  const root = await temporaryRoot(t), { origin, requests, setOnline } = await fixtureServer(t);
   const contexts = [], launches = [];
   const launcher = { launchPersistentContext: async (profile, options) => {
     launches.push({ profile, options });
@@ -109,6 +114,10 @@ for (const [restoreSession, offlineRestore] of [[false, false], [true, false], [
   assert.equal((await page.goto(origin + '/authenticated')).status(), 200);
   await first.close();
   assert.throws(() => requireScheduleSession(page), /stale or closed/);
+  // Chromium can restore a tab before Playwright applies offline emulation.
+  // Make the fixture itself unavailable during startup to model a real outage,
+  // then bring it back while the reopened context is still explicitly offline.
+  if (offlineRestore) await setOnline(false);
   const requestsBeforeRestore = requests.length;
 
   const reopened = new ScheduleSessionBrowser({ dataDir: root, launcher, restoreSession });
@@ -117,7 +126,8 @@ for (const [restoreSession, offlineRestore] of [[false, false], [true, false], [
   assert.notEqual(requireScheduleSession(restoredPage).contextId, originalContextId);
   assert.deepEqual(launches.map(item => item.profile), [path.join(root, 'browser-profile'), path.join(root, 'browser-profile')]);
   if (offlineRestore) {
-    assert.equal(requests.length, requestsBeforeRestore, 'restored startup cannot reach the fixture server while offline');
+    await setOnline(true);
+    assert.equal(requests.length, requestsBeforeRestore, 'restored startup cannot reach the fixture server while offline: ' + JSON.stringify(requests.slice(requestsBeforeRestore)));
     await restoredPage.context().route('**/*', route => ['GET', 'HEAD'].includes(route.request().method()) ? route.fallback() : route.abort());
     await restoredPage.context().setOffline(false);
   }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {mkdtemp,mkdir,readFile,readdir,rm,writeFile} from 'node:fs/promises';
+import {mkdtemp,mkdir,readFile,readdir,realpath,rm,writeFile} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -55,9 +55,10 @@ async function hashes(dir){return Promise.all((await readdir(dir)).sort().map(as
 // All ERP-shaped requests are served by this in-memory fixture. No real ERP,
 // user profile, cookies, or authentication state are read or copied.
 async function fixture(t,{dayTitleInput=true}={}){
- const root=await mkdtemp(path.join(os.tmpdir(),'product-only-season-recovery-'));
+ const tempRoot=await realpath(os.tmpdir());
+ const root=await realpath(await mkdtemp(path.join(tempRoot,'product-only-season-recovery-')));
  const imagePath=path.join(root,'fixture.png');await writeFile(imagePath,png);const originalPlan=plan(imagePath);
- const browsers=[];let started;t.after(async()=>{await started?.close().catch(()=>{});for(const b of browsers)await b.close().catch(()=>{});const resolved=path.resolve(root);assert.ok(resolved.startsWith(path.resolve(os.tmpdir())+path.sep));await rm(resolved,{recursive:true,force:true});});
+ const browsers=[];let started;t.after(async()=>{await started?.close().catch(()=>{});for(const b of browsers)await b.close().catch(()=>{});const resolved=path.resolve(root);assert.ok(resolved.startsWith(tempRoot+path.sep));await rm(resolved,{recursive:true,force:true});});
  async function open(name,persisted){
   let server;
   const browser=new ScheduleSessionBrowser({dataDir:path.join(root,name),launcher:{launchPersistentContext:async(profile,options)=>{
