@@ -13,6 +13,9 @@ import { readProductOnlyIdentity, startProductOnlyLauncher, validateProductOnlyL
 import { createProductOnlyAdapters } from './product-only-adapters.mjs';
 import { readPublicImage, imageMime } from './plugin-image.mjs';
 import { chromium } from 'playwright';
+import { flightPreflight, sourceQuality, workflowTiming, changeWait } from './plugin-workflow.mjs';
+import { scopeFor } from './product-only-review.mjs';
+import { seasonResumeCheckpoint } from './plugin-resume.mjs';
 
 const copy = value => structuredClone(value);
 const fail = message => { throw new Error(message); };
@@ -33,7 +36,8 @@ function publicOutcome(result) {
   return {
     status: result.status, finalCheck: result.finalCheck?.status,
     target, productUrl: target?.productId ? `https://basecamp.team/tour/master_product/${target.productId}/change/` : null,
-    phases: result.phases?.map(phase => ({ name: phase.name, status: phase.verification ? 'verified' : 'unverified' })), timing: result.timing,
+    departure: result.finalCheck?.result?.departure ?? null,
+    phases: result.phases?.map(phase => ({ name: phase.name, status: phase.verification ? 'verified' : 'unverified', durationMs: phase.durationMs })), timing: result.timing,
     budget: result.budget
   };
 }
@@ -105,6 +109,7 @@ export class ProductImportPlugin {
 
   async source({ url, filePath, text, seasonMode } = {}) {
     return this.exclusive(async () => {
+      const startedAt = new Date().toISOString();
       if (!['excluded', 'included'].includes(seasonMode)) fail('시즌 포함/제외 범위를 먼저 정하세요.');
       if ([url, filePath, text].filter(value => value !== undefined).length !== 1) fail('URL, 엑셀, 상품 원문 텍스트 중 하나만 전달하세요.');
       let source;
@@ -115,7 +120,7 @@ export class ProductImportPlugin {
         source = { kind: 'text', label: '사용자 제공 상품자료', evidence: { untrusted: true, text, coverage: 'user-provided-text' } };
       }
       const id = randomUUID(), capturedAt = new Date().toISOString();
-      const job = { version: 1, id, createdAt: capturedAt, status: 'source-ready', seasonMode, source, sourceDigest: digest(source), sourceDescriptor: { id: 'source-' + id, kind: source.kind, reference: source.label, capturedAt }, images: [], draft: null };
+      const job = { version: 1, id, createdAt: capturedAt, startedAt, waits: [], status: 'source-ready', seasonMode, source, sourceDigest: digest(source), sourceDescriptor: { id: 'source-' + id, kind: source.kind, reference: source.label, capturedAt }, images: [], draft: null };
       await mkdir(this.directory(id), { mode: 0o700 });
       await writeJson(path.join(this.directory(id), 'job.json'), job, true);
       return this.get({ id, includeSource: true });
@@ -123,9 +128,44 @@ export class ProductImportPlugin {
   }
 
   async image({ id, filePath, url, alt } = {}) {
+    const result = await this.images({ id, images: [{ filePath, url, alt }] });
+    return result.images[0];
+  }
+
+  async images({ id, images } = {}) {
     return this.exclusive(async () => {
       const job = await this.load(id);
       if (!editable.has(job.status)) fail('검토 중이거나 실행된 작업의 이미지는 변경할 수 없습니다.');
+      if (!Array.isArray(images) || images.length < 1 || images.length > 20) fail('이미지를 1~20개 전달하세요.');
+      const captured = [];
+      // Bound concurrent public reads; persist only after every read succeeds.
+      for (let offset = 0; offset < images.length; offset += 4) {
+        const batch = await Promise.allSettled(images.slice(offset, offset + 4).map(item => this.captureImage(item)));
+        const failed = batch.find(item => item.status === 'rejected');
+        if (failed) throw failed.reason;
+        captured.push(...batch.map(item => item.value));
+      }
+      const unique = new Set([...job.images.map(item => item.sha256), ...captured.map(item => item.sha256)]);
+      if (unique.size > 20) fail('상품당 최대 20개 이미지를 지원합니다.');
+      const result = [];
+      for (const { bytes, mimeType, sourceUrl, sha256, alt } of captured) {
+        const duplicate = job.images.find(item => item.sha256 === sha256);
+        if (duplicate) { result.push(duplicate); continue; }
+        const imageId = 'image-' + sha256.slice(0, 24);
+        const name = imageId + ({ 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp' })[mimeType];
+        const image = { id: imageId, name, path: path.join(this.directory(id), name), mimeType, sha256, alt, ...(sourceUrl ? { sourceUrl } : {}) };
+        try { await writeFile(image.path, bytes, { flag: 'wx', mode: 0o600 }); }
+        catch (error) {
+          if (error.code !== 'EEXIST' || (await lstat(image.path)).isSymbolicLink() || createHash('sha256').update(await readFile(image.path)).digest('hex') !== sha256) throw error;
+        }
+        job.images.push(image); result.push(image);
+      }
+      job.status = 'source-ready'; job.validation = null;
+      await this.save(job); return { images: [...new Map(result.map(item => [item.id, item])).values()], inputImageIds: result.map(item => item.id), totalImages: job.images.length };
+    });
+  }
+
+  async captureImage({ filePath, url, alt } = {}) {
       if (typeof alt !== 'string' || !alt.trim() || alt.length > 1000) fail('이미지 설명이 필요합니다.');
       if (Boolean(filePath) === Boolean(url)) fail('로컬 이미지 경로 또는 공개 이미지 URL 하나만 지정하세요.');
       let bytes, mimeType, sourceUrl;
@@ -139,15 +179,29 @@ export class ProductImportPlugin {
         bytes = await readFile(resolved); mimeType = imageMime(bytes);
       }
       if (!Buffer.isBuffer(bytes) || bytes.length > 2_000_000 || imageMime(bytes) !== mimeType) fail('이미지 형식/크기를 확인하세요.');
-      const sha256 = createHash('sha256').update(bytes).digest('hex'), imageId = 'image-' + sha256.slice(0, 24);
-      const duplicate = job.images.find(item => item.sha256 === sha256);
-      if (duplicate) return duplicate;
-      if (job.images.length >= 20) fail('상품당 최대 20개 이미지를 지원합니다.');
-      const name = imageId + ({ 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp' })[mimeType];
-      const image = { id: imageId, name, path: path.join(this.directory(id), name), mimeType, sha256, alt, ...(sourceUrl ? { sourceUrl } : {}) };
-      await writeFile(image.path, bytes, { flag: 'wx', mode: 0o600 });
-      job.images.push(image); job.status = 'source-ready'; job.validation = null;
-      await this.save(job); return image;
+      const sha256 = createHash('sha256').update(bytes).digest('hex');
+      return { bytes, mimeType, sourceUrl, sha256, alt };
+  }
+
+  async supplement({ id, url, text, sections } = {}) {
+    return this.exclusive(async () => {
+      const job = await this.load(id);
+      if (!editable.has(job.status) || job.source.kind !== 'url' || url !== job.source.label) fail('검토 전 같은 상품 URL의 보충 원문만 추가할 수 있습니다.');
+      if (typeof text !== 'string' || !text.trim() || text.length > 200000 || !Array.isArray(sections) || !sections.length || sections.some(value => typeof value !== 'string' || !value.trim() || value.length > 200)) fail('보충 원문과 직접 확인한 상세/일차 구간이 필요합니다.');
+      job.source.supplements ??= [];
+      if (job.source.supplements.length >= 10) fail('보충 원문은 최대 10회 추가할 수 있습니다.');
+      if (!job.source.supplements.some(item => item.digest === digest(text))) job.source.supplements.push({ text, sections: copy(sections), url, untrusted: true, digest: digest(text), capturedAt: new Date().toISOString() });
+      job.sourceDigest = digest(job.source); job.status = 'source-ready'; job.validation = null;
+      await this.save(job); return this.get({ id, includeSource: true });
+    });
+  }
+
+  async wait({ id, reason } = {}) {
+    return this.exclusive(async () => {
+      const job = await this.load(id);
+      if (this.active?.id === id || job.finishedAt || !editable.has(job.status)) fail('실행 중이거나 종료된 작업의 대기 시간은 변경할 수 없습니다.');
+      changeWait(job, reason); await this.save(job);
+      return { id, timing: workflowTiming(job) };
     });
   }
 
@@ -157,7 +211,8 @@ export class ProductImportPlugin {
       ...copy(registration), target: { mode: 'NEW' }, product: copy(product), ...copy(observed),
       source: { digest: job.sourceDigest, rows: product.itinerary.map(day => ({ id: 'day-' + day.day, sourceId: job.sourceDescriptor.id, day: day.day })), images: copy(job.images) },
       itinerary: product.itinerary.map(day => ({ ...copy(day), sourceRowId: 'day-' + day.day })),
-      seasonMode: job.seasonMode
+      seasonMode: job.seasonMode,
+      ...(job.resumeFrom ? { resumeFrom: copy(job.resumeFrom) } : {})
     };
     return validateProductOnlyLaunchPlan(plan);
   }
@@ -166,10 +221,11 @@ export class ProductImportPlugin {
     const questions = [];
     const source = validateProductImport({ product: job.draft.product, seasonMode: job.seasonMode });
     questions.push(...source.errors.map(error => ({ field: error.field, message: error.message })));
+    if (job.seasonMode === 'included') questions.push(...flightPreflight(job.draft.registration.season, job.draft.product.departures?.find(item => item.startDate === job.draft.registration.season?.selectedDates?.[0])));
     try {
       const plan = this.assemble(job);
       const adapters = createProductOnlyAdapters({ plan, identity: forbidden, authorizeWrite: forbidden, record: forbidden, loadImage: forbidden, verifyUploadedImage: forbidden });
-      for (const name of ['basic', 'media', 'shell', 'day', 'season']) {
+      for (const name of ['basic', 'media', 'shell', 'day', 'season', 'departure']) {
         if (!adapters[name]) continue;
         const check = adapters[name].preflight(plan);
         questions.push(...check.blockers.map(message => ({ field: name, message })));
@@ -183,10 +239,11 @@ export class ProductImportPlugin {
     return this.exclusive(async () => {
       const job = await this.load(id);
       if (!editable.has(job.status)) fail('이미 검토를 시작한 작업입니다. 작업 상태를 먼저 확인하세요.');
-      if (!registration || typeof registration !== 'object' || Array.isArray(registration) || Object.keys(registration).some(key => !['basic', 'display', 'content', 'shell', 'season'].includes(key))) fail('registration은 basic/display/content/shell/season만 받습니다.');
+      if (!registration || typeof registration !== 'object' || Array.isArray(registration) || Object.keys(registration).some(key => !['basic', 'display', 'content', 'shell', 'season', 'departure'].includes(key))) fail('registration은 basic/display/content/shell/season/departure만 받습니다.');
       if (!Array.isArray(product?.sources) || !product.sources.some(item => same(item, job.sourceDescriptor))) fail('반환된 sourceDescriptor를 product.sources에 그대로 포함하세요.');
       if (job.seasonMode === 'excluded' && Object.hasOwn(registration, 'season')) fail('시즌 제외 작업에는 season을 전달하지 마세요.');
       job.draft = { product: copy(product), registration: copy(registration) };
+      changeWait(job, null);
       job.validation = this.validate(job); job.status = job.validation.readyForReview ? 'ready-for-review' : 'needs-input';
       await this.save(job); return this.get({ id });
     });
@@ -197,6 +254,42 @@ export class ProductImportPlugin {
       if (this.active) fail('열린 검토/실행을 먼저 완료하세요.');
       return this.browser.open();
     });
+  }
+
+  async resume({ id, season } = {}) {
+    return this.exclusive(async () => {
+      if (this.active) fail('현재 검토/실행이 끝난 뒤 이어하기를 준비하세요.');
+      const parent = await this.load(id);
+      if (parent.status !== 'needs-reconciliation' || parent.resumeFrom) fail('시즌 준비 중 중단된 원래 작업만 이어갈 수 있습니다. 다른 중단은 독립 대사가 필요합니다.');
+      const planPath = path.join(this.directory(id), 'approved-plan.json'), journalPath = path.join(this.directory(id), 'run', 'journal.jsonl');
+      for (const file of [planPath, journalPath]) { const info = await lstat(file); if (!info.isFile() || info.isSymbolicLink()) fail('원래 계획과 장부는 일반 파일이어야 합니다.'); }
+      const planText = await readFile(planPath, 'utf8'), journalText = await readFile(journalPath, 'utf8');
+      if (!journalText.endsWith('\n')) fail('저장 장부가 중간에 끊겼습니다. 독립 대사가 필요합니다.');
+      const originalPlan = JSON.parse(planText), rows = journalText.trimEnd().split('\n').map(JSON.parse);
+      const seed = seasonResumeCheckpoint(originalPlan, rows), childId = randomUUID();
+      if (!same(originalPlan.product, parent.draft.product)) fail('원래 초안이 승인된 상품과 다릅니다.');
+      const from = { id, planDigest: originalPlan.approvalBinding.planDigest, journalDigest: digest(journalText), planFileDigest: digest(planText), target: seed.targets };
+      const reservation = path.join(this.directory(id), 'resume-reservation.json');
+      // One durable child per interrupted job; neither cancellation nor restart opens a second create path.
+      await writeJson(reservation, { childId, ...from }, true);
+      const job = { version: 1, id: childId, createdAt: new Date().toISOString(), startedAt: parent.startedAt ?? parent.createdAt, status: 'source-ready', seasonMode: parent.seasonMode, source: copy(parent.source), sourceDigest: parent.sourceDigest, sourceDescriptor: copy(parent.sourceDescriptor), images: copy(parent.images), draft: copy(parent.draft), waits: copy(parent.waits ?? []), resumeFrom: from, resumeSeed: seed };
+      if (season !== undefined) job.draft.registration.season = copy(season);
+      job.validation = this.validate(job); job.status = job.validation.readyForReview ? 'ready-for-review' : 'needs-input';
+      await mkdir(this.directory(childId), { mode: 0o700 }); await writeJson(path.join(this.directory(childId), 'job.json'), job, true);
+      return { ...await this.get({ id: childId }), notice: '기존 상품·이미지·상세·전체 일정을 다시 조회한 뒤 남은 시즌부터 진행합니다. 새 검토는 기존 위임 범위 안에서 제출할 수 있으며, 기본상품은 다시 만들지 않습니다.' };
+    });
+  }
+
+  async assertResume(job) {
+    const from = job.resumeFrom;
+    if (!from) return;
+    const root = this.directory(from.id);
+    const [planText, journalText, reservation] = await Promise.all([
+      readFile(path.join(root, 'approved-plan.json'), 'utf8'), readFile(path.join(root, 'run', 'journal.jsonl'), 'utf8'), readFile(path.join(root, 'resume-reservation.json'), 'utf8').then(JSON.parse)
+    ]);
+    if (digest(planText) !== from.planFileDigest || digest(journalText) !== from.journalDigest || reservation.childId !== job.id || !same(seasonResumeCheckpoint(JSON.parse(planText), journalText.trimEnd().split('\n').map(JSON.parse)), job.resumeSeed)) fail('원래 저장 장부나 이어하기 대상이 변경됐습니다.');
+    const observed = await this.identityReader(await this.browser.ensurePage()), original = JSON.parse(planText);
+    if (observed.companyId !== original.companyId || observed.identity.accountKey !== original.identity.accountKey || observed.identity.accountName !== original.identity.accountName) fail('이어하기 회사·계정이 원래 승인과 다릅니다.');
   }
   async context() {
     return this.exclusive(async () => {
@@ -213,6 +306,7 @@ export class ProductImportPlugin {
       const job = await this.load(id);
       if (job.status !== 'ready-for-review') fail('등록 준비를 완료하고 작업 상태를 확인하세요.');
       const page = await this.browser.ensurePage(), observed = await this.identityReader(page);
+      await this.assertResume(job);
       const plan = this.assemble(job, observed);
       const planPath = path.join(this.directory(id), 'approved-plan.json');
       await writeJson(planPath, plan, true);
@@ -224,29 +318,32 @@ export class ProductImportPlugin {
       } };
       let launcher;
       try {
-        launcher = await this.launch({ ...this.launchOptions, plan, planPath, dataDir: path.join(this.directory(id), 'run'), browser: ownedBrowser });
+        launcher = await this.launch({ budgetMode: 'report', ...this.launchOptions, plan, planPath, dataDir: path.join(this.directory(id), 'run'), browser: ownedBrowser, ...(job.resumeFrom ? { resume: copy(job.resumeSeed), assertResume: () => this.assertResume(job) } : {}) });
       } catch (error) {
         job.status = 'review-preparation-failed'; job.failure = { message: error.message, erpWriteStarted: false };
         await this.save(job); throw error;
       }
       job.status = 'awaiting-approval'; job.planDigest = plan.approvalBinding.planDigest;
+      changeWait(job, 'approval');
       const active = { id, launcher, plan:copy(plan), done: null }; this.active = active; this.reviews.add(launcher);
       active.done = launcher.completed.then(async result => {
-        job.status = result.status; job.result = publicOutcome(result); await this.save(job);
+        job.status = result.status; job.result = publicOutcome(result); job.finishedAt = new Date().toISOString();
+        changeWait(job, null, launcher.writes.find(event => event.kind === 'approval-claim')?.at ?? Date.now());
+        job.result.workflowTiming = workflowTiming(job); await this.save(job);
       }, async error => {
         const claimed = launcher.writes.some(event => event.kind === 'approval-claim');
         job.status = claimed ? 'needs-reconciliation' : 'cancelled';
+        changeWait(job, null, launcher.writes.find(event => event.kind === 'approval-claim')?.at ?? Date.now());
         job.failure = { message: error.message, erpWriteStarted: claimed, progress: executionProgress(launcher.writes) }; await this.save(job);
       }).finally(async () => {
         if (this.active === active) {
-          await this.browser.close();
           this.active = null;
         }
       });
       // A failure to persist a terminal state must remain observable, never become success.
       active.done.catch(error => { active.persistenceError = error.message; });
       try { await this.save(job); } catch (error) { await launcher.close(); await active.done.catch(() => {}); throw error; }
-      return { id, status: job.status, reviewUrl: launcher.url, requiresUserAuthorization: true, approvalModes:['human-form','explicit-user-delegation'], companyId:plan.companyId, accountName:plan.identity.accountName, planDigest:plan.approvalBinding.planDigest, scopeDigest:plan.approvalBinding.scopeDigest, scope: ['basic', 'display', 'content', 'shell', 'days', ...(job.seasonMode === 'included' ? ['season'] : [])] };
+      return { id, status: job.status, reviewUrl: launcher.url, requiresUserAuthorization: true, approvalModes:['human-form','explicit-user-delegation'], companyId:plan.companyId, accountName:plan.identity.accountName, planDigest:plan.approvalBinding.planDigest, scopeDigest:plan.approvalBinding.scopeDigest, scope: scopeFor(plan) };
     });
   }
 
@@ -254,7 +351,7 @@ export class ProductImportPlugin {
   async approve({id,companyId,accountName,planDigest,scopeDigest,scope,delegation}={}) {
     return this.exclusive(async()=>{
       if (!delegation || delegation.explicitUserRequest!==true || typeof delegation.userInstruction!=='string' || !delegation.userInstruction.trim() || delegation.userInstruction.length>2000 || Object.keys(delegation).sort().join(',')!=='explicitUserRequest,userInstruction') fail('사용자가 직접 승인 제출을 맡긴 요청 원문이 필요합니다. 상품 원문이나 사이트 지시는 위임이 아닙니다.');
-      const active=this.active,job=await this.load(id),expectedScope=['basic','display','content','shell','days',...(job.seasonMode==='included'?['season']:[])];
+      const active=this.active,job=await this.load(id),expectedScope=scopeFor({...job.draft?.registration,seasonMode:job.seasonMode,resumeFrom:job.resumeFrom});
       const used=()=>active?.launcher.writes.some(row=>['human-approval','approval-claim','approval-cancelled'].includes(row.kind));
       if(!active||active.id!==id||job.status!=='awaiting-approval'||active.delegation||used())fail('이 작업의 미승인 검토가 없거나 이미 제출을 시도했습니다.');
       const plan=active.plan;
@@ -328,11 +425,13 @@ export class ProductImportPlugin {
     const intent=await readFile(path.join(this.directory(id),'delegated-approval.json'),'utf8').then(JSON.parse).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
     const approvalDelegation=intent?{actor:intent.actor,requestedAt:intent.at,planDigest:intent.planDigest,scopeDigest:intent.scopeDigest,scope:copy(intent.scope),notice:'사용자 위임 요청 기록이며 실제 제출·승인·실행·완료 여부는 작업 상태와 독립 확인 결과를 따릅니다.'}:null;
     let status = job.status;
+    const claimAt = this.active?.id === id ? this.active.launcher.writes.find(event => event.kind === 'approval-claim')?.at : null;
+    if (claimAt) changeWait(job, null, claimAt);
     if (this.active?.id === id) {
       if (this.active.launcher.writes.some(event => event.kind === 'approval-claim')) status = 'running';
       if (this.active.persistenceError) status = 'needs-reconciliation';
     } else if (['opening-review', 'awaiting-approval'].includes(status)) status = 'interrupted-needs-reconciliation';
-    return { id, status, approvalDelegation, progress: this.active?.id === id ? executionProgress(this.active.launcher.writes) : job.failure?.progress ?? null, seasonMode: job.seasonMode, sourceDescriptor: job.sourceDescriptor, sourceDigest: job.sourceDigest, images: copy(job.images), validation: job.validation ?? null, result: job.result ?? null, failure: job.failure ?? null, ...(includeSource ? { source: copy(job.source), draft: copy(job.draft) } : {}) };
+    return { id, status, resumeFrom: job.resumeFrom ?? null, timing: workflowTiming(job), sourceQuality: { ...sourceQuality(job.source), supplementCount: job.source.supplements?.length ?? 0 }, approvalDelegation, progress: this.active?.id === id ? executionProgress(this.active.launcher.writes) : job.failure?.progress ?? null, seasonMode: job.seasonMode, sourceDescriptor: job.sourceDescriptor, sourceDigest: job.sourceDigest, images: copy(job.images), validation: job.validation ?? null, result: job.result ?? null, failure: job.failure ?? null, ...(includeSource ? { source: copy(job.source), draft: copy(job.draft) } : {}) };
   }
 
   async close() {

@@ -20,7 +20,7 @@ test('portable MCP exposes scoped explicit delegation while preserving source an
   try {
     await client.connect(transport);
     const tools = (await client.listTools()).tools;
-    assert.equal(tools.length, 11);
+    for (const name of ['product_import_images', 'product_import_source_supplement', 'product_import_wait', 'product_import_flight_minutes', 'product_import_resume']) assert.ok(tools.some(tool => tool.name === name));
     assert.ok(!tools.some(tool => /execute|publish/.test(tool.name)));
     const approval=tools.find(tool=>tool.name==='product_import_approve');
     assert.ok(approval);
@@ -29,6 +29,8 @@ test('portable MCP exposes scoped explicit delegation while preserving source an
     assert.deepEqual(approval.inputSchema.required.sort(),['accountName','companyId','delegation','id','planDigest','scope','scopeDigest'].sort());
     const caps = await call('product_import_capabilities');
     assert.equal(caps.requiresLlmApiKey, false);
+    assert.equal(caps.version, '0.2.0'); assert.equal(caps.setupTargetMs, 1200000); assert.equal(caps.timingIsGuarantee, false);
+    assert.ok(caps.scope.includes('optional-single-departure'));
     assert.equal(caps.liveEndToEndVerified, false);
     assert.equal(caps.requiresUserAuthorization,true);
     assert.deepEqual(caps.approvalModes,['human-form','explicit-user-delegation']);

@@ -12,7 +12,7 @@ const text = (value, name) => {
 const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
 const money = value => Number.isFinite(Number(value)) ? new Intl.NumberFormat('ko-KR').format(Number(value)) : '미입력';
 const valueText = value => typeof value === 'string' && value.trim() ? value : '미입력';
-const scopeFor = plan => PRODUCT_ONLY_REVIEW_SCOPE.filter(phase => phase !== 'season' || plan.seasonMode !== 'excluded');
+export const scopeFor = plan => [...(plan.resumeFrom ? ['season'] : PRODUCT_ONLY_REVIEW_SCOPE.filter(phase => phase !== 'season' || plan.seasonMode !== 'excluded')), ...(plan.departure?.create ? ['departure'] : [])];
 const exactScope = (scope, plan) => {
   const expected = scopeFor(plan);
   return Array.isArray(scope) && scope.length === expected.length && scope.every((value, index) => value === expected[index]);
@@ -21,10 +21,12 @@ const exactScope = (scope, plan) => {
 function scopeRows(plan) {
   const options = plan.basic.options;
   return [
+    ...(plan.resumeFrom ? [['저장 확인된 기존 상품', 'readback only', `${plan.resumeFrom.target.masterCode} / ${plan.resumeFrom.target.productId}; 기본·이미지·상세·전체 일정 재저장 없음`]] : [
     ['기본정보', 'basic', `도시 ${options.cityLabel}; 담당 ${options.managerLabel}; 우선순위 ${options.priority}; 예약마감 ${options.cutoffDays}일; 비공개`],
     ['표시·상세·참조', 'display, content', `표시 필드 ${Object.keys(plan.display.fields).join(', ') || '없음'}; 이미지 ${plan.source.images.length}장`],
-    ['일정', 'shell, days', `${plan.shell.title}; ${plan.itinerary.length}일 전체 일정과 식사`],
-    ...(plan.seasonMode === 'excluded' ? [] : [['시즌·항공', 'season', `${plan.season.selectedDates.join(', ')}; 선택 운임과 시즌 입력만`]])
+    ['일정', 'shell, days', `${plan.shell.title}; ${plan.itinerary.length}일 전체 일정과 식사`]]),
+    ...(plan.seasonMode === 'excluded' ? [] : [['시즌·항공', 'season', `${plan.season.selectedDates.join(', ')}; 선택 운임과 시즌 입력만`]]),
+    ...(plan.departure?.create ? [['행사 1건', 'departure', `${plan.season.selectedDates[0]}; 저장한 시즌·전체 일정 연결; ${plan.departure.status === '3' ? '예약가능' : '예약마감'}`]] : [])
   ];
 }
 
@@ -99,7 +101,7 @@ export function renderProductOnlyReview(session, csrf, message = '', executes = 
     ${seasonExcluded ? '<section><h2>시즌 제외</h2><p>시즌을 저장하지 않으며 최종 독립 조회로 시즌 0건을 확인합니다.</p></section>' : `<section><h2>시즌 금액·인원·항공</h2><p>시즌명: <strong>${escapeHtml(valueText(plan.season.fields?.title))}</strong> · 출발지: <strong>${escapeHtml(valueText(plan.season.selectLabels?.departport))}</strong> · 선택일: <strong>${escapeHtml(plan.season.selectedDates.join(', '))}</strong><br>최소/최대 인원: <strong>${escapeHtml(valueText(plan.season.fields?.min_pax_count))} / ${escapeHtml(valueText(plan.season.fields?.max_pax_count))}</strong></p><h3>기본가 + 유류할증</h3><table><tr><th>구분</th><th>기본가</th><th>유류할증</th><th>합계</th></tr>${seasonPriceRows(plan.season)}</table><h3>현지 시각 항공편</h3><table><tr><th>구간</th><th>편명</th><th>항공사</th><th>출발 공항</th><th>도착 공항</th><th>출발 현지일시</th><th>도착 현지시각</th></tr>${flightRows(plan.season)}</table></section>`}
     <section><h2>${plan.itinerary.length}일 전체 일정과 식사</h2><table><tr><th>일차</th><th>제목</th><th>내용</th><th>식사</th></tr>${itineraryRows(plan.itinerary)}</table></section>
     <details open><summary>이미지·콘텐츠·호텔 후보 (${plan.source.images.length}장)</summary><p>모든 이미지는 승인된 로컬 경로, SHA-256, MIME과 일치해야 하고 업로드 뒤 공개 CDN에서 테넌트와 SHA-256을 다시 검증합니다.</p><p>호텔 후보: ${escapeHtml((product.hotels ?? []).map(hotel => hotel?.name ?? hotel).join(' / ') || '없음')}</p><p><strong>호텔 배정은 이 실행에서 비활성화되어 있습니다.</strong></p>${actualContent(plan)}</details>
-    <section class="warn"><h2>제외·안전 작업</h2><p><strong>행사 생성·행사 연결·호텔 배정은 제외됩니다.</strong> 판매 채널, 공개, 발행, 취소/환불 설정도 실행하지 않습니다. 저장 결과가 불명확하면 자동 재시도하지 않고 조정(reconciliation) 상태로 종료합니다.</p><p>이 화면에서 직접 승인하거나, 채팅에서 이 작업의 승인 제출을 AI에게 명시적으로 맡길 수 있습니다. 위임받은 AI도 동일한 검토 폼을 제출하며, 계획·계정·옵션·이미지 바이트가 바뀌면 차단됩니다.</p></section>
+    <section class="warn"><h2>제외·안전 작업</h2><p><strong>${plan.departure?.create ? '행사 1건 생성·일정 연결을 포함합니다. 호텔 배정은 제외됩니다.' : '행사 생성·행사 연결·호텔 배정은 제외됩니다.'}</strong> 판매 채널, 공개, 발행, 취소/환불 설정도 실행하지 않습니다. 저장 결과가 불명확하면 자동 재시도하지 않고 조정(reconciliation) 상태로 종료합니다.</p><p>이 화면에서 직접 승인하거나, 채팅에서 이 작업의 승인 제출을 AI에게 명시적으로 맡길 수 있습니다. 위임받은 AI도 동일한 검토 폼을 제출하며, 계획·계정·옵션·이미지 바이트가 바뀌면 차단됩니다.</p></section>
     <section><h2>회사·계정 직접 확인과 1회 승인</h2><p>${executes ? `승인 뒤 하나의 브라우저/페이지에서 기본정보, 표시·상세, 일정 전체${seasonExcluded ? '를' : ', 시즌을'} 저장하고 최종 독립 GET으로 다시 확인합니다.` : '이 화면은 검토 전용입니다.'}</p>${form}${message ? `<p class="warn">${escapeHtml(message)}</p>` : ''}</section>
   </body></html>`;
 }

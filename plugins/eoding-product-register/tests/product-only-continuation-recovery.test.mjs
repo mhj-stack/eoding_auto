@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -28,7 +28,7 @@ function plan(imagePath) {
     content: { detail: { include: [{ name: 'Hotel', description: 'One night' }], exclude: [], information: ['Fixture note'], mainPoints: ['Fixture point'], shoppingCount: '0' }, elements: [{ type: '3', text: 'Fixture heading' }, { type: '1', text: 'Fixture body' }] },
     shell: { title: 'Fixture schedule' }, itinerary: normalized.itinerary.map(day => ({ ...day, sourceRowId: `row-${day.day}` })),
     season: {
-      fields: { title: 'Fixture season', currency_code: 'KRW', adult_base_price: '100000', child_base_price: '80000', infant_base_price: '0', adult_fuel_price: '0', child_fuel_price: '0', infant_fuel_price: '0', min_pax_count: '2', max_pax_count: '10', 'depart-0-depart_date': '2027-01-10', 'depart-0-flight_no': 'F100', 'depart-0-depart_time': '09:00', 'depart-0-arrive_time': '11:00', 'arrive-0-depart_date': '2027-01-11', 'arrive-0-flight_no': 'F101', 'arrive-0-depart_time': '12:40', 'arrive-0-arrive_time': '16:15', 'outbound-0-depart_time': '09:00', 'return-0-arrive_time': '16:15' },
+      fields: { title: 'Fixture season', currency_code: 'KRW', adult_base_price: '100000', child_base_price: '80000', infant_base_price: '0', adult_fuel_price: '0', child_fuel_price: '0', infant_fuel_price: '0', min_pax_count: '2', max_pax_count: '10', 'depart-0-depart_date': '2027-01-10', 'depart-0-flight_no': 'F100', 'depart-0-depart_time': '09:00', 'depart-0-arrive_time': '11:00', 'depart-0-moving_time': '120', 'arrive-0-depart_date': '2027-01-11', 'arrive-0-flight_no': 'F101', 'arrive-0-depart_time': '12:40', 'arrive-0-arrive_time': '16:15', 'arrive-0-moving_time': '215', 'outbound-0-depart_time': '09:00', 'return-0-arrive_time': '16:15' },
       selects: { departport: '1', 'depart-0-airline': '2', 'depart-0-depart_cd': '3', 'depart-0-arrive_cd': '4', 'arrive-0-airline': '2', 'arrive-0-depart_cd': '4', 'arrive-0-arrive_cd': '3' },
       selectLabels: { departport: 'Fixture departure', 'depart-0-airline': 'Fixture Air', 'depart-0-depart_cd': 'ICN', 'depart-0-depart_cd': 'ICN', 'depart-0-arrive_cd': 'TPE', 'arrive-0-airline': 'Fixture Air', 'arrive-0-depart_cd': 'TPE', 'arrive-0-arrive_cd': 'ICN' },
       selectedDates: ['2027-01-10']
@@ -81,7 +81,9 @@ function savedDetail() {
   return value;
 }
 async function recoveryFixture(t, receipt = { productId:812345, masterCode:'CJU-SYNTHETIC' }) {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'product-only-recovery-'));
+  // Windows runners may expose TEMP through a short-name or junction alias.
+  // Historical fixtures must use the same canonical paths as real journals.
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'product-only-recovery-')));
   t.after(() => rm(root, { recursive:true, force:true }));
   const imagePath = path.join(root, 'fixture.png'); await writeFile(imagePath, png);
   const value = plan(imagePath), original = await originalEvidence(root, value, receipt);

@@ -58,3 +58,27 @@ test('persisted pending execution is never silently made retryable after restart
   await assert.rejects(() => f.runtime.prepare({ id: f.job.id, product: normalized(f.job), registration: {} }), /이미 검토/);
   await assert.rejects(() => f.runtime.review({ id: f.job.id }), /등록 준비/);
 });
+
+test('batch images use bounded parallel reads, deduplicate bytes, and do not persist a partial failed batch', async t => {
+  let concurrent = 0, peak = 0;
+  const f = await fixture(t, { readers: { readImage: async url => {
+    concurrent++; peak = Math.max(peak, concurrent); await new Promise(resolve => setTimeout(resolve, 8)); concurrent--;
+    if (url.endsWith('/bad')) throw new Error('fixture image failed');
+    return { bytes: png, mimeType: 'image/png', sourceUrl: url };
+  } } });
+  const result = await f.runtime.images({ id: f.job.id, images: Array.from({ length: 9 }, (_, index) => ({ url: `https://example.com/${index}`, alt: `image ${index}` })) });
+  assert.equal(peak, 4); assert.equal(result.images.length, 1); assert.equal(result.inputImageIds.length, 9); assert.equal(result.totalImages, 1);
+  const second = await f.runtime.source({ text: 'Second source', seasonMode: 'excluded' });
+  await assert.rejects(() => f.runtime.images({ id: second.id, images: [{ url: 'https://example.com/good', alt: 'good' }, { url: 'https://example.com/bad', alt: 'bad' }] }), /fixture image failed/);
+  assert.equal((await f.runtime.get({ id: second.id })).images.length, 0);
+});
+
+test('source supplement retains the original descriptor, binds new evidence, and rejects another URL', async t => {
+  const f = await fixture(t, { readers: { readSource: async () => ({ text: '메뉴만 수집', untrusted: true }) } });
+  const original = await f.runtime.source({ url: 'https://example.com/product/1', seasonMode: 'excluded' });
+  assert.equal(original.sourceQuality.needsBrowserRead, true);
+  const next = await f.runtime.supplement({ id: original.id, url: 'https://example.com/product/1', text: '1일차 세부 일정과 식사', sections: ['1일차'] });
+  assert.deepEqual(next.sourceDescriptor, original.sourceDescriptor); assert.notEqual(next.sourceDigest, original.sourceDigest);
+  assert.equal(next.source.supplements[0].untrusted, true);
+  await assert.rejects(() => f.runtime.supplement({ id: original.id, url: 'https://example.com/product/2', text: 'wrong', sections: ['detail'] }), /같은 상품/);
+});
