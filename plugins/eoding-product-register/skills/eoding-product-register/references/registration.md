@@ -26,6 +26,7 @@ registration:
   - 일부만 대표/갤러리에 쓸 때 sourceMode=reference-subset. images에는 갤러리 이미지 ID를 순서대로 지정한다. 나머지도 상세 참조 이미지로 보존된다. 긴 상세 이미지를 전시 갤러리에 몰아넣지 않는다.
 - content: {detail: {include:[{name,description}], exclude:[{name,description}], information:[문자열], mainPoints:[문자열], shoppingCount:숫자문자열, includeNote?, excludeNote?}, elements:[{type:'3',text:제목},{type:'1',text:본문}]}
   - 쇼핑 횟수도 원문 또는 사용자 결정 근거가 필요하다.
+  - 원문 일정에 쇼핑센터가 나오면 detail.shopping=[{name, cityLabel, time, items, refund:'possible'|'impossible', description, nameEn?, refundTerm?}]로 넣는다(최대 10곳). cityLabel은 `product_import_lookup({kind:'city'})`의 label 그대로. 저장 시 같은 도시·같은 이름의 사용 중인 ERP 쇼핑 콘텐츠가 있으면 재사용하고, 없으면 새로 만들어 상세의 쇼핑정보에 연결한다. 행사는 생성 시점의 상세를 복사하므로 쇼핑 연결은 행사보다 먼저 끝난다. 원문에 없는 품목·소요시간을 지어내지 않는다.
 - shell: {title: 일정표 이름}
 - season: 시즌 포함 작업에만 지정. 제외 작업에서는 키 자체를 생략한다.
 - departure: 행사를 요청한 작업만 {create:true,status:'3' 또는 '4'}. 3=예약가능, 4=예약마감. 출발일 1건·KRW·왕복 항공 시즌을 저장한 뒤 해당 시즌과 전체 일정을 연결한다. 기존 행사가 있으면 신규 생성을 차단한다.

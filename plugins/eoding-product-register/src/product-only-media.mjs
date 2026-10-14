@@ -1,5 +1,6 @@
 import {isDeepStrictEqual as same} from 'node:util';
 import {applyProductContent} from './product-content-adapter.mjs';
+import {validateShoppingPlan} from './product-content-native.mjs';
 const clone=value=>structuredClone(value);
 const fail=message=>{throw Error(message)};
 function preflight(plan){
@@ -16,6 +17,7 @@ function preflight(plan){
   if(!detail||!['include','exclude','information','mainPoints'].every(k=>Array.isArray(detail[k]))||typeof detail.shoppingCount!=='string'||!(/^[0-9]+$/).test(detail.shoppingCount))blockers.push('Missing native detail plan');
   else if(['include','exclude'].some(k=>detail[k].some(r=>!r||typeof r.name!=='string'||typeof r.description!=='string'))||['information','mainPoints'].some(k=>detail[k].some(v=>typeof v!=='string'))||['includeNote','excludeNote'].some(k=>detail[k]!==undefined&&typeof detail[k]!=='string'))blockers.push('Invalid native detail values');
   if(!Array.isArray(elements)||elements.some(e=>!e||!['1','3'].includes(String(e.type))||typeof e.text!=='string'))blockers.push('Missing native reference elements');
+  if(detail)try{validateShoppingPlan(detail.shopping);}catch(error){blockers.push(error.message);}
   return {canExecute:!blockers.length,blockers};
 }
 /** The combined coordinator stage; approval and browser lifecycles belong to the caller. */

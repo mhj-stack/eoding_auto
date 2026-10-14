@@ -76,3 +76,23 @@ test('ERP lookup rows keep exact labels, flag retired staff and expose the engin
   await assert.rejects(() => erpLookup(page, { kind: 'city', query: ' ' }), /검색어/);
   await assert.rejects(() => erpLookup(page, { kind: 'departport' }), /상품 ID/);
 });
+
+test('shopping centers validate strictly and map to the native ERP form and detail section 8', async () => {
+  const { validateShoppingPlan, shoppingCreateFields, expectedDetail, shoppingRows } = await import('../src/product-content-native.mjs');
+  const item = { name: '보석백화점', cityLabel: '홍콩(HKG)', time: '약 40분', items: '보석', refund: 'possible', description: '홍콩 단체 쇼핑센터' };
+  assert.deepEqual(validateShoppingPlan(undefined), []);
+  assert.deepEqual(validateShoppingPlan([item]), [item]);
+  assert.throws(() => validateShoppingPlan([{ ...item, refund: 'maybe' }]), /refund/);
+  assert.throws(() => validateShoppingPlan([{ ...item, time: '' }]), /time/);
+  assert.throws(() => validateShoppingPlan([item, { ...item }]), /Duplicate/);
+  assert.throws(() => validateShoppingPlan([{ ...item, extra: 1 }]), /Invalid shopping/);
+  const fields = shoppingCreateFields(item, { cityId: '2786', countryId: '40', continentId: '3' });
+  assert.deepEqual(fields, { name_ko: '보석백화점', name: '', continent: '3', country: '40', city: '2786', use_flag: 'True', shopping_time: '약 40분', shopping_item: '보석', refund_flag: '1', refund_term: '', homepage: '', description: '홍콩 단체 쇼핑센터', keyword: '', image_sort: '{"old":[],"new":[]}' });
+  const before = { 1: { etc: '[]', etc2: '' }, 2: { etc: '[]', etc2: '' }, 3: { etc: '[]' }, 4: { etc: '[]' }, 8: { etc: '[]', etc2: '', etc5: '0' } };
+  const detail = { include: [], exclude: [], information: [], mainPoints: [], shoppingCount: '3' };
+  assert.equal(expectedDetail(before, detail)['8'].etc, '[]');
+  const linked = expectedDetail(before, detail, ['717', '3801']);
+  assert.deepEqual(linked['8'], { etc: shoppingRows(['717', '3801']), etc2: '', etc5: '3' });
+  assert.equal(linked['8'].etc, '[{"id":"717"},{"id":"3801"}]');
+  assert.throws(() => expectedDetail({ ...before, 8: { etc: '[{"id":"1"}]', etc5: '1' } }, detail, ['717']), /Existing native shopping/);
+});
