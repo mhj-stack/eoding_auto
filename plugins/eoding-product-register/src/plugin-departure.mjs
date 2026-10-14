@@ -70,7 +70,12 @@ export function createPluginDepartureAdapter({ assertIdentity, authorizeWrite, r
   async function list(page, targets) {
     const url = listUrl(targets);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
-    await page.waitForFunction(() => { const settings = globalThis.jQuery?.fn?.dataTable?.settings; return Array.isArray(settings) && settings.length === 1 && settings[0]?._bInitComplete === true; }, undefined, { timeout: timeoutMs });
+    try {
+      await page.waitForFunction(() => { const settings = globalThis.jQuery?.fn?.dataTable?.settings; return Array.isArray(settings) && settings.length === 1 && settings[0]?._bInitComplete === true; }, undefined, { timeout: timeoutMs });
+    } catch (error) {
+      const state = await page.evaluate(() => { const settings = globalThis.jQuery?.fn?.dataTable?.settings; return { url: location.pathname, jquery: Boolean(globalThis.jQuery), tables: Array.isArray(settings) ? settings.length : null, initComplete: Array.isArray(settings) ? settings.map(item => item?._bInitComplete === true) : null }; }).catch(() => null);
+      fail(`행사 목록 표가 로드되지 않았습니다(${timeoutMs}ms): ${JSON.stringify(state)}`);
+    }
     await assertIdentity(page);
     return readObservedDepartureList(page, { url, extractEventId: row => canonicalId(row.id) });
   }
@@ -171,11 +176,20 @@ export function createPluginDepartureAdapter({ assertIdentity, authorizeWrite, r
         if (typeof managerId !== 'string' || !managerId.trim()) fail('검증된 기본상품 담당자 값이 없습니다.');
         await chooseManager(page, managerId, basicReceipt.managerLabel); expected.manager = managerId;
         // Wait for the ERP's season-selection handler to finish before verifying every bound value.
-        await page.waitForFunction(want => Object.entries(want).every(([name, value]) => {
-          if (['master_product_id', 'title', 'status'].includes(name)) return true;
-          const controls = document.querySelectorAll(`#create_product_form [name="${name}"]`);
-          return controls.length === 1 && controls[0].value.replaceAll(',', '') === value;
-        }), expected, { timeout: timeoutMs });
+        try {
+          await page.waitForFunction(want => Object.entries(want).every(([name, value]) => {
+            if (['master_product_id', 'title', 'status'].includes(name)) return true;
+            const controls = document.querySelectorAll(`#create_product_form [name="${name}"]`);
+            return controls.length === 1 && controls[0].value.replaceAll(',', '') === value;
+          }), expected, { timeout: timeoutMs });
+        } catch (error) {
+          // Record exactly which bound values never matched so a live failure is diagnosable.
+          const mismatches = await page.evaluate(want => Object.entries(want).filter(([name]) => !['master_product_id', 'title', 'status'].includes(name)).map(([name, value]) => {
+            const controls = [...document.querySelectorAll(`#create_product_form [name="${name}"]`)];
+            return { name, expected: value, count: controls.length, actual: controls.map(control => control.value) };
+          }).filter(item => item.count !== 1 || item.actual[0].replaceAll(',', '') !== item.expected), expected).catch(() => null);
+          fail(`행사 폼 값이 ${timeoutMs}ms 안에 승인값과 맞춰지지 않았습니다: ${JSON.stringify(mismatches)}`);
+        }
         await choose(page, 'status', plan.departure.status);
         await page.locator('#id_title').fill(plan.product.title);
         const date = plan.season.selectedDates[0];
