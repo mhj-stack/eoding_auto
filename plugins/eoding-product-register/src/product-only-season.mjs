@@ -57,7 +57,7 @@ function durableEvidence(value, binding) {
 }
 
 /** Coordinator bridge for the native season adapter; it creates neither approvals nor events. */
-export function createProductOnlySeasonAdapter({ origin = 'https://basecamp.team', assertIdentity, authorizeWrite, record, timeoutMs = 15_000 } = {}) {
+export function createProductOnlySeasonAdapter({ origin = 'https://basecamp.team', assertIdentity, authorizeWrite, record, timeoutMs = 15_000, seedReceipt } = {}) {
   if (typeof origin !== 'string' || new URL(origin).origin !== origin || !origin.startsWith('https://') || ![assertIdentity, authorizeWrite, record].every(callback => typeof callback === 'function')) fail('Season requires exact HTTPS origin, identity, authorization and durable record callbacks');
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) fail('Season timeoutMs must be a positive safe integer');
   const native = createSeasonAdapter({ origin, responseTimeoutMs: timeoutMs });
@@ -107,7 +107,7 @@ export function createProductOnlySeasonAdapter({ origin = 'https://basecamp.team
     async save(page, plan, context) {
       const checked = preflight(plan);
       if (!checked.canExecute) fail(checked.blockers.join('; '));
-      if (invoked) fail('Season stage cannot be retried; reconcile the previous attempt');
+      if (invoked || seedReceipt) fail('Season stage cannot be retried; reconcile the previous attempt');
       const current = checkedContext(context);
       checkedPlan(plan, current);
       if (bound && !same(bound, { binding: current.binding, target: current.target })) fail('Season execution binding changed');
@@ -161,6 +161,11 @@ export function createProductOnlySeasonAdapter({ origin = 'https://basecamp.team
     },
     async readFinal(page, receipt, context) {
       const current = checkedContext(context);
+      // Departure-only resume: the season was saved by the original run and is re-read here, never rewritten.
+      if (!saved && seedReceipt) {
+        if (receipt?.kind !== 'season-save-receipt-v1' || !same(receipt, seedReceipt.receipt) || receipt.target?.productId !== current.seasonTarget.productId) fail('Resumed season receipt differs from the verified original');
+        return native.verifyReceipt(page, clone(receipt), { target: current.seasonTarget, plan: clone(seedReceipt.plan), assertIdentity: identity(page, current.seasonTarget) });
+      }
       if (!saved || !savedSeasonPlan || !savedSeasonTarget || !savedClaim || !same(receipt, saved)) fail('Season final receipt differs from the saved stage receipt');
       if (current.binding.planDigest !== bound?.binding.planDigest || current.binding.scopeDigest !== bound?.binding.scopeDigest || current.claim.planDigest !== savedClaim.planDigest || current.claim.scopeDigest !== savedClaim.scopeDigest || !same(current.claim.target, savedClaim.target)) fail('Season final claim binding changed');
       if (current.target.productId !== bound.target.productId || current.target.masterCode !== bound.target.masterCode || current.target.scheduleId !== bound.target.scheduleId) fail('Season final target changed');

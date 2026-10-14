@@ -12,7 +12,8 @@ const text = (value, name) => {
 const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
 const money = value => Number.isFinite(Number(value)) ? new Intl.NumberFormat('ko-KR').format(Number(value)) : '미입력';
 const valueText = value => typeof value === 'string' && value.trim() ? value : '미입력';
-export const scopeFor = plan => [...(plan.resumeFrom ? ['season'] : PRODUCT_ONLY_REVIEW_SCOPE.filter(phase => phase !== 'season' || plan.seasonMode !== 'excluded')), ...(plan.departure?.create ? ['departure'] : [])];
+const resumeRemaining = plan => plan.resumeFrom?.remaining ?? ['season'];
+export const scopeFor = plan => plan.resumeFrom && resumeRemaining(plan)[0] === 'departure' ? ['departure'] : [...(plan.resumeFrom ? ['season'] : PRODUCT_ONLY_REVIEW_SCOPE.filter(phase => phase !== 'season' || plan.seasonMode !== 'excluded')), ...(plan.departure?.create ? ['departure'] : [])];
 const exactScope = (scope, plan) => {
   const expected = scopeFor(plan);
   return Array.isArray(scope) && scope.length === expected.length && scope.every((value, index) => value === expected[index]);
@@ -21,11 +22,11 @@ const exactScope = (scope, plan) => {
 function scopeRows(plan) {
   const options = plan.basic.options;
   return [
-    ...(plan.resumeFrom ? [['저장 확인된 기존 상품', 'readback only', `${plan.resumeFrom.target.masterCode} / ${plan.resumeFrom.target.productId}; 기본·이미지·상세·전체 일정 재저장 없음`]] : [
+    ...(plan.resumeFrom ? [['저장 확인된 기존 상품', 'readback only', `${plan.resumeFrom.target.masterCode} / ${plan.resumeFrom.target.productId}; 기본·이미지·상세·전체 일정${resumeRemaining(plan)[0] === 'departure' ? '·시즌' : ''} 재저장 없음`]] : [
     ['기본정보', 'basic', `도시 ${options.cityLabel}; 담당 ${options.managerLabel}; 우선순위 ${options.priority}; 예약마감 ${options.cutoffDays}일; 비공개`],
     ['표시·상세·참조', 'display, content', `표시 필드 ${Object.keys(plan.display.fields).join(', ') || '없음'}; 이미지 ${plan.source.images.length}장`],
     ['일정', 'shell, days', `${plan.shell.title}; ${plan.itinerary.length}일 전체 일정과 식사`]]),
-    ...(plan.seasonMode === 'excluded' ? [] : [['시즌·항공', 'season', `${plan.season.selectedDates.join(', ')}; 선택 운임과 시즌 입력만`]]),
+    ...(plan.seasonMode === 'excluded' || resumeRemaining(plan)[0] === 'departure' && plan.resumeFrom ? [] : [['시즌·항공', 'season', `${plan.season.selectedDates.join(', ')}; 선택 운임과 시즌 입력만`]]),
     ...(plan.departure?.create ? [['행사 1건', 'departure', `${plan.season.selectedDates[0]}; 저장한 시즌·전체 일정 연결; ${plan.departure.status === '3' ? '예약가능' : '예약마감'}`]] : [])
   ];
 }

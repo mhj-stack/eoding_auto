@@ -10,7 +10,7 @@ import {installStageTransport} from './stage-transport.mjs';
 import {createPluginDepartureAdapter} from './plugin-departure.mjs';
 const clone=x=>structuredClone(x),fail=m=>{throw Error(m)};
 /** Internal composition only: caller owns human approval, durable journal, and browser lifecycle. */
-export function createProductOnlyAdapters({plan,identity,authorizeWrite,record,loadImage,verifyUploadedImage,controls,timeoutMs=15000,beforeBasicPrepare,seedBasicReceipt,reconciledDetail,reconciledUploads}={}){
+export function createProductOnlyAdapters({plan,identity,authorizeWrite,record,loadImage,verifyUploadedImage,controls,timeoutMs=15000,beforeBasicPrepare,seedBasicReceipt,seedSeasonReceipt,reconciledDetail,reconciledUploads}={}){
  const approved=clone(plan);
  if(!same(approved?.target,{mode:'NEW'})||!same(approved.approvalBinding,createProductOnlyApprovalBinding(approved)))fail('Composition requires an exact bound NEW plan');
  const assertIdentity=async page=>{const observed=await identity(page);if(!same(observed,approved.identity))fail('Approved identity changed');return digest(observed);};
@@ -18,7 +18,7 @@ export function createProductOnlyAdapters({plan,identity,authorizeWrite,record,l
  const media=createProductOnlyMediaAdapter({assertIdentity,authorizeWrite,record,loadImage,verifyUploadedImage,controls,timeoutMs,reconciledDetail,reconciledUploads});
  const seasonExcluded=approved.seasonMode==='excluded';
  if(seasonExcluded&&Object.hasOwn(approved,'season'))fail('Excluded season mode requires plan.season to be absent');
- const season=seasonExcluded?null:createProductOnlySeasonAdapter({assertIdentity,authorizeWrite,record,timeoutMs});
+ const season=seasonExcluded?null:createProductOnlySeasonAdapter({assertIdentity,authorizeWrite,record,timeoutMs,...(seedSeasonReceipt?{seedReceipt:{receipt:clone(seedSeasonReceipt),plan:clone(approved.season)}}:{})});
  const departure=approved.departure?.create?createPluginDepartureAdapter({assertIdentity,authorizeWrite,record,timeoutMs}):null;
  let finalEvidence=null,finalPage=null;
  const bindingCheck=(p,c)=>{

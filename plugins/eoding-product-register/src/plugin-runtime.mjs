@@ -15,7 +15,7 @@ import { readPublicImage, imageMime } from './plugin-image.mjs';
 import { chromium } from 'playwright';
 import { flightPreflight, sourceQuality, workflowTiming, changeWait } from './plugin-workflow.mjs';
 import { scopeFor } from './product-only-review.mjs';
-import { seasonResumeCheckpoint } from './plugin-resume.mjs';
+import { resumeCheckpoint } from './plugin-resume.mjs';
 import { erpLookup } from './erp-lookup.mjs';
 
 const copy = value => structuredClone(value);
@@ -265,23 +265,23 @@ export class ProductImportPlugin {
     return this.exclusive(async () => {
       if (this.active) fail('현재 검토/실행이 끝난 뒤 이어하기를 준비하세요.');
       const parent = await this.load(id);
-      if (parent.status !== 'needs-reconciliation' || parent.resumeFrom) fail('시즌 준비 중 중단된 원래 작업만 이어갈 수 있습니다. 다른 중단은 독립 대사가 필요합니다.');
+      if (parent.status !== 'needs-reconciliation' || parent.resumeFrom) fail('시즌 또는 행사 준비 중 중단된 원래 작업만 이어갈 수 있습니다. 다른 중단은 독립 대사가 필요합니다.');
       const planPath = path.join(this.directory(id), 'approved-plan.json'), journalPath = path.join(this.directory(id), 'run', 'journal.jsonl');
       for (const file of [planPath, journalPath]) { const info = await lstat(file); if (!info.isFile() || info.isSymbolicLink()) fail('원래 계획과 장부는 일반 파일이어야 합니다.'); }
       const planText = await readFile(planPath, 'utf8'), journalText = await readFile(journalPath, 'utf8');
       if (!journalText.endsWith('\n')) fail('저장 장부가 중간에 끊겼습니다. 독립 대사가 필요합니다.');
       const originalPlan = JSON.parse(planText), rows = journalText.trimEnd().split('\n').map(JSON.parse);
-      const seed = seasonResumeCheckpoint(originalPlan, rows), childId = randomUUID();
+      const seed = resumeCheckpoint(originalPlan, rows), childId = randomUUID();
       if (!same(originalPlan.product, parent.draft.product)) fail('원래 초안이 승인된 상품과 다릅니다.');
-      const from = { id, planDigest: originalPlan.approvalBinding.planDigest, journalDigest: digest(journalText), planFileDigest: digest(planText), target: seed.targets };
+      const from = { id, planDigest: originalPlan.approvalBinding.planDigest, journalDigest: digest(journalText), planFileDigest: digest(planText), target: seed.targets, remaining: copy(seed.remaining) };
       const reservation = path.join(this.directory(id), 'resume-reservation.json');
       // One durable child per interrupted job; neither cancellation nor restart opens a second create path.
       await writeJson(reservation, { childId, ...from }, true);
       const job = { version: 1, id: childId, createdAt: new Date().toISOString(), startedAt: parent.startedAt ?? parent.createdAt, status: 'source-ready', seasonMode: parent.seasonMode, source: copy(parent.source), sourceDigest: parent.sourceDigest, sourceDescriptor: copy(parent.sourceDescriptor), images: copy(parent.images), draft: copy(parent.draft), waits: copy(parent.waits ?? []), resumeFrom: from, resumeSeed: seed };
-      if (season !== undefined) job.draft.registration.season = copy(season);
+      if (season !== undefined) { if (seed.remaining[0] !== 'season') fail('시즌이 이미 저장돼 있어 시즌을 바꿀 수 없습니다.'); job.draft.registration.season = copy(season); }
       job.validation = this.validate(job); job.status = job.validation.readyForReview ? 'ready-for-review' : 'needs-input';
       await mkdir(this.directory(childId), { mode: 0o700 }); await writeJson(path.join(this.directory(childId), 'job.json'), job, true);
-      return { ...await this.get({ id: childId }), notice: '기존 상품·이미지·상세·전체 일정을 다시 조회한 뒤 남은 시즌부터 진행합니다. 새 검토는 기존 위임 범위 안에서 제출할 수 있으며, 기본상품은 다시 만들지 않습니다.' };
+      return { ...await this.get({ id: childId }), notice: seed.remaining[0] === 'departure' ? '기존 상품·이미지·상세·전체 일정·시즌을 다시 조회한 뒤 남은 행사만 만듭니다. 기본상품과 시즌은 다시 만들지 않습니다.' : '기존 상품·이미지·상세·전체 일정을 다시 조회한 뒤 남은 시즌부터 진행합니다. 새 검토는 기존 위임 범위 안에서 제출할 수 있으며, 기본상품은 다시 만들지 않습니다.' };
     });
   }
 
@@ -292,7 +292,7 @@ export class ProductImportPlugin {
     const [planText, journalText, reservation] = await Promise.all([
       readFile(path.join(root, 'approved-plan.json'), 'utf8'), readFile(path.join(root, 'run', 'journal.jsonl'), 'utf8'), readFile(path.join(root, 'resume-reservation.json'), 'utf8').then(JSON.parse)
     ]);
-    if (digest(planText) !== from.planFileDigest || digest(journalText) !== from.journalDigest || reservation.childId !== job.id || !same(seasonResumeCheckpoint(JSON.parse(planText), journalText.trimEnd().split('\n').map(JSON.parse)), job.resumeSeed)) fail('원래 저장 장부나 이어하기 대상이 변경됐습니다.');
+    if (digest(planText) !== from.planFileDigest || digest(journalText) !== from.journalDigest || reservation.childId !== job.id || !same(resumeCheckpoint(JSON.parse(planText), journalText.trimEnd().split('\n').map(JSON.parse)), job.resumeSeed)) fail('원래 저장 장부나 이어하기 대상이 변경됐습니다.');
     const observed = await this.identityReader(await this.browser.ensurePage()), original = JSON.parse(planText);
     if (observed.companyId !== original.companyId || observed.identity.accountKey !== original.identity.accountKey || observed.identity.accountName !== original.identity.accountName) fail('이어하기 회사·계정이 원래 승인과 다릅니다.');
   }

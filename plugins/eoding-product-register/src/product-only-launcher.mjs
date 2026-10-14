@@ -492,6 +492,7 @@ export async function startProductOnlyLauncher({ plan: rawPlan, planPath, dataDi
     timeoutMs,
     beforeBasicPrepare
     ,seedBasicReceipt: resume?.checkpoint.basic
+    ,seedSeasonReceipt: resume?.checkpoint.season?.receipt
   });
   const verifyResume = async page => {
     await assertResume();
@@ -503,7 +504,9 @@ export async function startProductOnlyLauncher({ plan: rawPlan, planPath, dataDi
     const proof = await adapters.reconcileSavedStages(page, clone(resume.checkpoint));
     const { readback } = await import('./product-season-adapter.mjs');
     const seasons = await readback(page, { target: { productId: String(resume.targets.productId) }, assertIdentity: async () => ({ identityDigest: digest(await identity(page)) }) });
-    if (seasons.seasons.length !== 0) fail('Existing season detected; resume cannot replay a season write');
+    // Season resume must find no season; departure resume must find exactly the verified season.
+    const savedSeason = resume.checkpoint.season?.seasonId;
+    if (savedSeason ? !same(seasons.seasons, [savedSeason]) : seasons.seasons.length !== 0) fail(savedSeason ? 'Saved season membership changed; departure resume blocked' : 'Existing season detected; resume cannot replay a season write');
     await assertResume(); transport.verify(); return proof;
   };
   const coordinator = new ProductOnlyExecutionCoordinator({ browser: browserForRun, approval: { claim: request => store.claim(request) }, journal, adapters, budgetMode, ...(resume ? { resume: { targets: resume.targets, results: resume.results, verify: verifyResume } } : {}) });
