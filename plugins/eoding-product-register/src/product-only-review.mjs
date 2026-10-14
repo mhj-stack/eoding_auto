@@ -74,6 +74,7 @@ function actualContent(plan) {
     <h3>상품 설명</h3><p>${escapeHtml(valueText(fields.product_description))}</p>
     <h3>포함</h3><ul>${itemRows(detail.include)}</ul>
     <h3>불포함</h3><ul>${itemRows(detail.exclude)}</ul>
+    ${Array.isArray(detail.shopping) && detail.shopping.length ? `<h3>쇼핑센터 (같은 도시·이름의 ERP 쇼핑 콘텐츠가 있으면 재사용, 없으면 새로 생성 후 연결)</h3><ul>${detail.shopping.map(item => `<li>${escapeHtml(item.name)} · ${escapeHtml(item.cityLabel)} · ${escapeHtml(item.time)} · ${escapeHtml(item.items)} · 환불 ${item.refund === 'possible' ? '가능' : '불가능'}</li>`).join('')}</ul>` : ''}
     <h3>안내·취소 규정 원문</h3>${elements.length ? elements.map(element => `<section><p>${escapeHtml(valueText(element.text))}</p></section>`).join('') : `<p>${escapeHtml(valueText(detail.cancellation))}</p>`}
   </details>`;
 }

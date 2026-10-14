@@ -39,11 +39,48 @@ export async function prepareNativeReferenceText(page,elements,picker,timeoutMs=
     if(await input.count()!==1)fail('Ambiguous native reference text field');await input.fill(element.text);
   }
 }
-function expectedDetail(before,detail){
+// Shopping centers are company-shared ERP contents (/contents/shopping/). A product links them in
+// detail section 8 as etc=[{"id":"<contentId>"}]; reuse an exact active same-city match, create otherwise.
+const REFUND=Object.freeze({possible:{flag:'1',text:'가능'},impossible:{flag:'2',text:'불가능'}});
+const SHOPPING_KEYS=new Set(['name','nameEn','cityLabel','time','items','refund','refundTerm','description']);
+export function validateShoppingPlan(list){
+  if(list===undefined)return [];
+  if(!Array.isArray(list)||list.length>10)fail('detail.shopping must be an array of at most 10 shopping centers');
+  for(const item of list){
+    if(!item||typeof item!=='object'||Array.isArray(item)||Object.keys(item).some(key=>!SHOPPING_KEYS.has(key)))fail('Invalid shopping center entry');
+    for(const key of ['name','cityLabel','time','items','description'])if(typeof item[key]!=='string'||!item[key].trim()||item[key]!==item[key].trim())fail(`Shopping center ${key} is required`);
+    if(!Object.hasOwn(REFUND,item.refund))fail('Shopping center refund must be possible or impossible');
+    for(const key of ['nameEn','refundTerm'])if(item[key]!==undefined&&typeof item[key]!=='string')fail(`Invalid shopping center ${key}`);
+  }
+  if(new Set(list.map(item=>`${item.cityLabel}\u0000${item.name}`)).size!==list.length)fail('Duplicate shopping center entry');
+  return list;
+}
+const cityName=label=>label.replace(/\s*\([^()]*\)\s*$/,'').trim()||label;
+/** Exact multipart fields the native shopping content form submits for a new active center. */
+export function shoppingCreateFields(item,region){
+  return {name_ko:item.name,name:item.nameEn??'',continent:region.continentId,country:region.countryId,city:region.cityId,use_flag:'True',shopping_time:item.time,shopping_item:item.items,refund_flag:REFUND[item.refund].flag,refund_term:item.refundTerm??'',homepage:'',description:item.description,keyword:'',image_sort:JSON.stringify({old:[],new:[]})};
+}
+async function getJson(page,path,headers={}){
+  return page.evaluate(async({path,headers})=>{const r=await fetch(path,{method:'GET',credentials:'same-origin',cache:'no-store',redirect:'error',headers});if(r.status!==200)throw Error('ERP read failed: '+r.status);return r.json();},{path,headers});
+}
+async function resolveRegion(page,cityLabel){
+  const cities=(await getJson(page,`/destination/autocomplete/region/city_in_country/?q=${encodeURIComponent(cityName(cityLabel))}`)).results?.filter(x=>x.text===cityLabel)??[];
+  if(cities.length!==1||!/^\d+$/.test(String(cities[0].id))||!Number.isSafeInteger(cities[0].parent_id))fail(`Shopping city is missing or ambiguous: ${cityLabel}`);
+  const countryId=String(cities[0].parent_id),countries=(await getJson(page,`/destination/autocomplete/region/country_in_continent/?id=${countryId}`)).results?.filter(x=>String(x.id)===countryId)??[];
+  if(countries.length!==1||!Number.isSafeInteger(countries[0].parent_id))fail(`Shopping country is missing: ${cityLabel}`);
+  return {cityId:String(cities[0].id),countryId,continentId:String(countries[0].parent_id)};
+}
+async function findShopping(page,item){
+  const body=await getJson(page,`/contents/shopping/?name_ko=${encodeURIComponent(item.name)}&datatable-draw=1&datatable-start=0&datatable-length=50`,{datatable:'true'});
+  if(!Array.isArray(body?.data))fail('Unexpected shopping search response');
+  return body.data.filter(row=>row.list_name_ko===item.name&&row.list_city===cityName(item.cityLabel)&&row.list_use_flag==='Y').map(row=>String(row.id));
+}
+export function shoppingRows(ids){return JSON.stringify(ids.map(id=>({id})));}
+export function expectedDetail(before,detail,shoppingIds=[]){
   const out=copy(before);
   for(const key of ['1','2','3','4'])if(before[key]?.etc!=='[]')fail('Existing native detail rows require reconciliation');
   for(const [id,key] of [['1','include'],['2','exclude']]){out[id].etc=JSON.stringify(detail[key].map(row=>({value:'Direct',label:row.name,remark:row.description})));if(detail[key+'Note']!==undefined){if(before[id].etc2!=='')fail('Existing native detail note');out[id].etc2=detail[key+'Note'];}}
-  out['3'].etc=JSON.stringify(detail.information.map(content=>({content})));out['4'].etc=JSON.stringify(detail.mainPoints.map(content=>({content})));if(!out['8'])fail('Missing native shopping baseline');out['8'].etc5=detail.shoppingCount;return out;
+  out['3'].etc=JSON.stringify(detail.information.map(content=>({content})));out['4'].etc=JSON.stringify(detail.mainPoints.map(content=>({content})));if(!out['8'])fail('Missing native shopping baseline');out['8'].etc5=detail.shoppingCount;if(shoppingIds.length){if(before['8'].etc!=='[]')fail('Existing native shopping rows require reconciliation');out['8'].etc=shoppingRows(shoppingIds);}return out;
 }
 function expectedReference(before,reference,images=[]){
   if(!Array.isArray(before)||before.length!==1||before[0]?.type!=='15'||before[0].etc2!=='[]'||!Array.isArray(before[0].image_group)||before[0].image_group.length)fail('Existing native reference content requires reconciliation');
@@ -76,6 +113,7 @@ async function payload(req,upload=false){
 /** Native ERP JSON payloads, rather than synthetic FormData(detail/reference). */
 export async function applyNativeProductContent(page,args){
   const {target,tenant,identity,beforeWrite,record,timeoutMs,verifyPersistedContent}=args;
+  const shoppingPlan=validateShoppingPlan(args.detail.shopping);
   const useUploads=args.display.useReferenceUploads===true;
   const selectedIndexes=args.display.uploadIndexes;
   if(selectedIndexes!==undefined&&(!useUploads||!Array.isArray(selectedIndexes)||!selectedIndexes.length||new Set(selectedIndexes).size!==selectedIndexes.length||selectedIndexes.some(i=>!Number.isInteger(i)||i<0||i>=args.reference.images.length)))fail('Invalid display upload selection');
@@ -110,7 +148,7 @@ export async function applyNativeProductContent(page,args){
     if(failed)fail('Native content blocked after an earlier failure');await assertIdentity();let timer;
     const packet=new Promise((resolve,reject)=>{timer=setTimeout(()=>reject(Error('Native payload capture timed out')),timeoutMs);pending={key,url,expected,forward,csrf,used:false,resolve,reject};});packet.catch(()=>{});
     const response=forward?page.waitForResponse(r=>r.request().method()==='POST'&&r.url()===url,{timeout:timeoutMs}).catch(()=>null):null;
-    try{await page.locator(selector).click({timeout:timeoutMs});const data=await packet;if(failed)fail('Unexpected ERP mutation blocked');if(response){const r=await response;if(!r?.ok())fail('Native save outcome unknown');completed.push(key);data.response=r;}return data;}
+    try{if(typeof selector==='function')await selector();else await page.locator(selector).click({timeout:timeoutMs});const data=await packet;if(failed)fail('Unexpected ERP mutation blocked');if(response){const r=await response;if(!r?.ok())fail('Native save outcome unknown');completed.push(key);data.response=r;}return data;}
     finally{clearTimeout(timer);pending=null;}
   };
   const save=async(key,url,selector,expected)=>{
@@ -130,11 +168,12 @@ export async function applyNativeProductContent(page,args){
     // Capture untouched baselines without sending any request to ERP.
     await tab('base');const base=await capture('display-baseline',target.endpoints.display,target.controls.displaySave);
     const imageBaseline=(approvedImages.length||useUploads)?await readDisplayImageState(page):null;if(imageBaseline?.images.length)fail('Native display image baseline is not empty');
-    await tab('detail');const detailBase=await capture('detail-baseline',target.endpoints.detail,target.controls.detailSave);const detailExpected=args.reconciledDetail?copy(args.reconciledDetail):expectedDetail(detailBase.body,args.detail);
+    await tab('detail');const detailBase=await capture('detail-baseline',target.endpoints.detail,target.controls.detailSave);let detailExpected=args.reconciledDetail?copy(args.reconciledDetail):expectedDetail(detailBase.body,args.detail);
     if(args.reconciledDetail){
       if(!same(detailBase.body,detailExpected))fail('Reconciled detail changed before media continuation');
       const blank=copy(detailExpected);for(const key of ['1','2','3','4'])blank[key].etc='[]';for(const key of ['1','2'])blank[key].etc2='';
-      if(!same(expectedDetail(blank,args.detail),detailExpected))fail('Reconciled detail differs from the approved content');
+      const reconciledShopping=shoppingPlan.length?parseNativeJson(detailExpected['8']?.etc??'[]').map(row=>String(row?.id)):[];if(reconciledShopping.length!==shoppingPlan.length)fail('Reconciled shopping rows differ from the approved plan');if(shoppingPlan.length)blank['8'].etc='[]';
+      if(!same(expectedDetail(blank,args.detail,reconciledShopping),detailExpected))fail('Reconciled detail differs from the approved content');
       await record({phase:'detail-reconciled',target:copy(target),payload:copy(detailExpected)});
     }
     await tab('productreference');const referenceBase=await capture('reference-baseline',target.endpoints.reference,target.controls.referenceSave);let referenceExpected=expectedReference(referenceBase.body,args.reference);
@@ -151,8 +190,29 @@ export async function applyNativeProductContent(page,args){
     if(approvedImages.length){await prepareExistingDisplayImages(page,{images:approvedImages,companyId:tenant.companyId,query:args.display.imageQuery});displayExpected.image_sort=JSON.stringify({images:approvedImages.map(x=>x.id)});}
     if(!useUploads)await save('display',target.endpoints.display,target.controls.displaySave,displayExpected);
     if(!args.reconciledDetail){
+    const shoppingIds=[];
+    for(const item of shoppingPlan){
+      await assertIdentity();
+      const existing=await findShopping(page,item);
+      if(existing.length>1)fail(`Ambiguous existing shopping center: ${item.name}`);
+      if(existing.length===1){shoppingIds.push(existing[0]);await record({phase:'shopping-reused',name:item.name,cityLabel:item.cityLabel,contentId:existing[0],target:copy(target)});continue;}
+      const region=await resolveRegion(page,item.cityLabel),fields=shoppingCreateFields(item,region),url=`${target.origin}/contents/shopping/add/`;
+      const post=()=>page.evaluate(async({url,fields})=>{const data=new FormData();for(const [k,v] of Object.entries(fields))data.append(k,v);const token=document.cookie.split('; ').find(x=>x.startsWith('csrftoken='))?.slice(10)??'';await fetch(url,{method:'POST',credentials:'same-origin',body:data,headers:{'X-CSRFToken':token,'X-Requested-With':'XMLHttpRequest'}}).catch(()=>null);},{url,fields});
+      const outcome=await save(`shopping:${item.name}`,url,post,fields);
+      const raw=await outcome.response.json(),contentId=String(raw?.id??raw?.data?.id??'');
+      if(!/^[1-9]\d*$/.test(contentId))fail('Shopping center create response has no id');
+      const readback=await findShopping(page,item);if(readback.length!==1||readback[0]!==contentId)fail(`Created shopping center readback mismatch: ${item.name}`);
+      await record({phase:'shopping-created',name:item.name,cityLabel:item.cityLabel,contentId,region,target:copy(target)});shoppingIds.push(contentId);
+    }
+    if(new Set(shoppingIds).size!==shoppingIds.length)fail('Two shopping entries resolved to the same ERP content');
+    if(shoppingIds.length)detailExpected=expectedDetail(detailBase.body,args.detail,shoppingIds);
     await tab('detail');for(const id of ['include','exclude','information','main-point']){const rows=args.detail[id==='main-point'?'mainPoints':id];if(await page.locator(`#${id} tbody input`).count())fail('Native detail is not empty');for(const value of rows){await page.locator(`button.row-add[data-target="${id}"]`).click();const inputs=page.locator(`#${id} tbody tr`).last().locator('input');if(id==='include'||id==='exclude'){if(await inputs.count()!==2)fail('Unexpected native detail row');await inputs.nth(0).fill(value.name);await inputs.nth(1).fill(value.description);}else await inputs.fill(value);}}
     for(const key of ['include','exclude'])if(args.detail[key+'Note']!==undefined)await page.locator(`#${key} textarea`).fill(args.detail[key+'Note']);await page.locator('#id_real_shopping_count').fill(args.detail.shoppingCount);
+    if(shoppingIds.length){
+      const rows=shoppingIds.map((id,i)=>({id,name:shoppingPlan[i].name,refund:REFUND[shoppingPlan[i].refund].text}));
+      const inserted=await page.evaluate(rows=>{const body=document.querySelector('#shopping-info tbody');if(!body||body.querySelectorAll('tr:not(.empty)').length)return false;body.querySelector('.empty')?.remove();rows.forEach((row,i)=>{const tr=document.createElement('tr');[String(i+1),row.id,row.name,row.refund].forEach((text,c)=>{const td=document.createElement('td');td.textContent=text;if(c===1){td.className='shopping-id';td.style.display='none';}if(c===2)td.className='td-left td-truncate';tr.append(td);});const del=document.createElement('td');const button=document.createElement('button');button.type='button';button.className='btn table_btn row-remove';button.textContent='삭제';del.append(button);tr.append(del);body.append(tr);});return true;},rows);
+      if(!inserted)fail('Native shopping table is missing or not empty');
+    }
     await save('detail',target.endpoints.detail,target.controls.detailSave,detailExpected);
     }
     await tab('productreference');await prepareNativeReferenceText(page,args.reference.elements,referencePicker,timeoutMs);
