@@ -168,8 +168,17 @@ export function createPluginDepartureAdapter({ assertIdentity, authorizeWrite, r
         const url = `${ORIGIN}/tour/master_product/${targets.productId}/create_product/?from=${targets.productId}`;
         const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
         if (response?.status() !== 200 || response.url() !== url || page.url() !== url) fail('정확한 행사 생성 화면을 열지 못했습니다.');
+        // The ERP binds its season handler only after its controller initializes; selecting at
+        // domcontentloaded left prices/pax/port empty on the live tenant (FSZ0001, HKG0000).
+        await page.waitForLoadState('load', { timeout: timeoutMs }).catch(() => {});
+        await page.waitForFunction(() => typeof globalThis.controller === 'object' && Boolean(document.getElementById('id_season')?.M_FormSelect), undefined, { timeout: 5000 }).catch(() => {});
         await choose(page, 'schedule', String(targets.scheduleId));
         await choose(page, 'season', season.seasonId);
+        const seasonBound = () => page.waitForFunction(() => (document.getElementById('id_adult_price')?.value ?? '') !== '', undefined, { timeout: 5000 }).then(() => true, () => false);
+        if (!await seasonBound()) {
+          await page.evaluate(() => globalThis.jQuery?.('#id_season').trigger('change'));
+          await seasonBound();
+        }
         expected = departureExpected(plan, targets, season.seasonId);
         const basicReceipt = context.verifiedPreviousPhases.find(item => item.name === 'basic').receipt;
         const managerId = basicReceipt.managerValue;
