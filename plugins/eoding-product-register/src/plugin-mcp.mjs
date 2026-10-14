@@ -32,7 +32,7 @@ register('product_import_capabilities', 'Read plugin scope, installation paths a
   setupTargetMs: SETUP_TARGET_MS, timingIncludes: ['source-collection', 'AI-coordination', 'user-waits', 'ERP-writes', 'independent-readback'], timingIsGuarantee: false,
   optimizations: ['flight-duration-preflight', 'bounded-image-batch', 'source-supplement', 'explicit-wait-accounting', 'retained-login-session'],
   inputDir: runtime.inputDir,
-  workflow: ['product_import_schema', 'product_import_source', 'product_import_image', 'product_import_prepare', 'product_import_browser_open', 'product_import_context', 'product_import_review', 'product_import_approve (only when explicitly delegated)', 'product_import_get'],
+  workflow: ['product_import_schema', 'product_import_source', 'product_import_image', 'product_import_prepare', 'product_import_browser_open', 'product_import_context', 'product_import_lookup', 'product_import_review', 'product_import_approve (only when explicitly delegated)', 'product_import_get'],
   notice: 'The connected AI interprets the sources and constructs internal inputs. Never ask the user to write JSON or approve every day. A plugin installation is not live ERP acceptance.'
 }));
 register('product_import_schema', 'Read the internal product/registration format and a fictional example before preparing a draft. Never copy example facts into a real product.', {}, readonly, async () => ({
@@ -65,6 +65,9 @@ register('product_import_resume', 'Prepare a single child job after basic/conten
 }, local, args => runtime.resume(args));
 register('product_import_browser_open', 'Open the dedicated ERP login browser. The user logs in directly. Does not save products or expose credentials.', {}, { ...local, openWorldHint: true }, () => runtime.openBrowser());
 register('product_import_context', 'Read the observed company ID and account display name from the dedicated browser. Does not return cookies or their values. Fails if login or company identity is ambiguous.', {}, readonly, () => runtime.context());
+register('product_import_lookup', 'Read exact ERP select labels and values (city, manager, airline, airport, departport) from the logged-in dedicated browser. Same-origin GET only; never saves. Use before product_import_prepare so cityLabel/managerLabel/season selects match the ERP display text exactly.', {
+  kind: z.enum(['city', 'manager', 'airline', 'airport', 'departport']), query: z.string().max(50).optional(), productId: z.string().regex(/^[1-9][0-9]{0,12}$/).optional()
+}, readonly, args => runtime.lookup(args));
 register('product_import_review', 'Prepare one local review of the exact complete requested product scope using the shared registration engine. Return reviewUrl and its job/company/account/plan/scope binding. The user may submit the form directly. When the user explicitly delegates that submission, call product_import_approve with the exact binding and direct user instruction. Opening a review does not authorize writes.', {
   id
 }, { ...local, destructiveHint: true, openWorldHint: true }, args => runtime.review(args));

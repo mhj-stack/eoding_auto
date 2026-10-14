@@ -16,11 +16,15 @@ import { chromium } from 'playwright';
 import { flightPreflight, sourceQuality, workflowTiming, changeWait } from './plugin-workflow.mjs';
 import { scopeFor } from './product-only-review.mjs';
 import { seasonResumeCheckpoint } from './plugin-resume.mjs';
+import { erpLookup } from './erp-lookup.mjs';
 
 const copy = value => structuredClone(value);
 const fail = message => { throw new Error(message); };
 const idPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
-const editable = new Set(['source-ready', 'needs-input', 'ready-for-review']);
+const editableStatuses = new Set(['source-ready', 'needs-input', 'ready-for-review']);
+// A review that failed before any ERP write (no plan claim, no run journal) can be corrected in place.
+const retryableReview = job => job.status === 'review-preparation-failed' && job.failure?.erpWriteStarted === false && job.failure?.retryable === true;
+const editable = { has: (status, job) => editableStatuses.has(status) || (job !== undefined && retryableReview(job)) };
 const forbidden = () => fail('검증 단계에서는 저장할 수 없습니다.');
 const pendingIdentity = { accountName: 'pending-login', accountKey: 'pending-login', sessionKey: 'pending-login' };
 
@@ -135,7 +139,7 @@ export class ProductImportPlugin {
   async images({ id, images } = {}) {
     return this.exclusive(async () => {
       const job = await this.load(id);
-      if (!editable.has(job.status)) fail('검토 중이거나 실행된 작업의 이미지는 변경할 수 없습니다.');
+      if (!editable.has(job.status, job)) fail('검토 중이거나 실행된 작업의 이미지는 변경할 수 없습니다.');
       if (!Array.isArray(images) || images.length < 1 || images.length > 20) fail('이미지를 1~20개 전달하세요.');
       const captured = [];
       // Bound concurrent public reads; persist only after every read succeeds.
@@ -186,7 +190,7 @@ export class ProductImportPlugin {
   async supplement({ id, url, text, sections } = {}) {
     return this.exclusive(async () => {
       const job = await this.load(id);
-      if (!editable.has(job.status) || job.source.kind !== 'url' || url !== job.source.label) fail('검토 전 같은 상품 URL의 보충 원문만 추가할 수 있습니다.');
+      if (!editable.has(job.status, job) || job.source.kind !== 'url' || url !== job.source.label) fail('검토 전 같은 상품 URL의 보충 원문만 추가할 수 있습니다.');
       if (typeof text !== 'string' || !text.trim() || text.length > 200000 || !Array.isArray(sections) || !sections.length || sections.some(value => typeof value !== 'string' || !value.trim() || value.length > 200)) fail('보충 원문과 직접 확인한 상세/일차 구간이 필요합니다.');
       job.source.supplements ??= [];
       if (job.source.supplements.length >= 10) fail('보충 원문은 최대 10회 추가할 수 있습니다.');
@@ -199,7 +203,7 @@ export class ProductImportPlugin {
   async wait({ id, reason } = {}) {
     return this.exclusive(async () => {
       const job = await this.load(id);
-      if (this.active?.id === id || job.finishedAt || !editable.has(job.status)) fail('실행 중이거나 종료된 작업의 대기 시간은 변경할 수 없습니다.');
+      if (this.active?.id === id || job.finishedAt || !editable.has(job.status, job)) fail('실행 중이거나 종료된 작업의 대기 시간은 변경할 수 없습니다.');
       changeWait(job, reason); await this.save(job);
       return { id, timing: workflowTiming(job) };
     });
@@ -238,13 +242,14 @@ export class ProductImportPlugin {
   async prepare({ id, product, registration } = {}) {
     return this.exclusive(async () => {
       const job = await this.load(id);
-      if (!editable.has(job.status)) fail('이미 검토를 시작한 작업입니다. 작업 상태를 먼저 확인하세요.');
+      if (!editable.has(job.status, job)) fail('이미 검토를 시작한 작업입니다. 작업 상태를 먼저 확인하세요.');
       if (!registration || typeof registration !== 'object' || Array.isArray(registration) || Object.keys(registration).some(key => !['basic', 'display', 'content', 'shell', 'season', 'departure'].includes(key))) fail('registration은 basic/display/content/shell/season/departure만 받습니다.');
       if (!Array.isArray(product?.sources) || !product.sources.some(item => same(item, job.sourceDescriptor))) fail('반환된 sourceDescriptor를 product.sources에 그대로 포함하세요.');
       if (job.seasonMode === 'excluded' && Object.hasOwn(registration, 'season')) fail('시즌 제외 작업에는 season을 전달하지 마세요.');
       job.draft = { product: copy(product), registration: copy(registration) };
       changeWait(job, null);
       job.validation = this.validate(job); job.status = job.validation.readyForReview ? 'ready-for-review' : 'needs-input';
+      if (job.failure?.retryable === true) job.failure = null;
       await this.save(job); return this.get({ id });
     });
   }
@@ -300,11 +305,22 @@ export class ProductImportPlugin {
     });
   }
 
+  /** Read-only exact label/value lookup for city, manager, airline, airport and departure port. */
+  async lookup({ kind, query, productId } = {}) {
+    return this.exclusive(async () => {
+      if (this.active) fail('등록 검토·실행 중에는 조회할 수 없습니다.');
+      const page = await this.browser.ensurePage();
+      const observed = await this.identityReader(page);
+      const found = await erpLookup(page, { kind, query, productId });
+      return { companyId: observed.companyId, accountName: observed.identity.accountName, ...found, notice: 'label을 registration·season.selectLabels에 그대로, value를 season.selects에 사용하세요. inactive 항목은 쓰지 마세요.' };
+    });
+  }
+
   async review({ id } = {}) {
     return this.exclusive(async () => {
       if (this.active) fail('다른 등록 검토가 열려 있습니다.');
       const job = await this.load(id);
-      if (job.status !== 'ready-for-review') fail('등록 준비를 완료하고 작업 상태를 확인하세요.');
+      if (job.status !== 'ready-for-review' && !retryableReview(job)) fail('등록 준비를 완료하고 작업 상태를 확인하세요.');
       const page = await this.browser.ensurePage(), observed = await this.identityReader(page);
       await this.assertResume(job);
       const plan = this.assemble(job, observed);
@@ -320,8 +336,15 @@ export class ProductImportPlugin {
       try {
         launcher = await this.launch({ budgetMode: 'report', ...this.launchOptions, plan, planPath, dataDir: path.join(this.directory(id), 'run'), browser: ownedBrowser, ...(job.resumeFrom ? { resume: copy(job.resumeSeed), assertResume: () => this.assertResume(job) } : {}) });
       } catch (error) {
-        job.status = 'review-preparation-failed'; job.failure = { message: error.message, erpWriteStarted: false };
-        await this.save(job); throw error;
+        // Preflight is read-only. If the run journal was never created, nothing could have been
+        // claimed or written, so drop the unapproved plan and let the draft be corrected in place.
+        const runDir = path.join(this.directory(id), 'run');
+        const journalCreated = await lstat(runDir).then(() => true, failure => { if (failure.code === 'ENOENT') return false; throw failure; });
+        if (!journalCreated) await unlink(planPath);
+        job.status = 'review-preparation-failed'; job.failure = { message: error.message, erpWriteStarted: false, retryable: !journalCreated };
+        await this.save(job);
+        if (!journalCreated) error.message += ' (ERP 저장 전 실패: product_import_prepare로 수정하거나 같은 작업으로 다시 검토할 수 있습니다.)';
+        throw error;
       }
       job.status = 'awaiting-approval'; job.planDigest = plan.approvalBinding.planDigest;
       changeWait(job, 'approval');

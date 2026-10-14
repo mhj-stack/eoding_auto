@@ -87,6 +87,27 @@ function timed(promise, milliseconds, message) {
   })]).finally(() => clearTimeout(timer));
 }
 
+const EXPANDER_TEXT = /^(일정\s*전체\s*(펼침|보기|펼치기)|전체\s*(펼침|펼치기)|일정\s*상세\s*보기|더보기|약관\s*더보기)$/;
+/** Clicks in-page expanders only: buttons, or anchors whose href stays on the page ("#..." / "javascript:"). */
+async function expandSections(page, budgetMs) {
+  if (budgetMs <= 0) return 0;
+  const until = Date.now()+budgetMs;
+  const handles = await page.locator('a,button,[role="button"]').evaluateAll((elements, pattern) => {
+    const re = new RegExp(pattern);
+    return elements.map((element, index) => ({ index, text: (element.innerText ?? '').replace(/\s+/g,' ').trim(), href: element.getAttribute('href'), tag: element.tagName, visible: element.getClientRects().length > 0 }))
+      .filter(item => item.visible && re.test(item.text) && (item.tag !== 'A' || item.href === null || /^(#|javascript:)/i.test(item.href)))
+      .map(item => item.index);
+  }, EXPANDER_TEXT.source).catch(() => []);
+  let clicked = 0;
+  const all = page.locator('a,button,[role="button"]');
+  for (const index of handles.slice(0, 8)) {
+    if (Date.now() >= until) break;
+    try { await all.nth(index).click({ timeout: Math.max(1, Math.min(1000, until-Date.now())), noWaitAfter: true }); clicked++; } catch {}
+  }
+  if (clicked) await page.waitForTimeout(Math.max(0, Math.min(700, until-Date.now())));
+  return clicked;
+}
+
 /** No ERP browser, profile, storage state, credentials, or cookies are reused. */
 export async function readSource(input, options = {}) {
   const timeoutMs = bounded(options.timeoutMs,45_000,120_000,'timeoutMs');
@@ -133,7 +154,7 @@ export async function readSource(input, options = {}) {
             timeout:Math.max(1,Math.min(navigationTimeoutMs,deadline-Date.now()))});
           headers = response.headers();
           if (!(response.status() >= 300 && response.status() < 400 && headers.location)) break;
-          target = (await validate(new URL(headers.location,target).href)).href;
+          target =(await validate(new URL(headers.location,target).href)).href;
           if (request.isNavigationRequest() && request.frame() === page?.mainFrame()) {
             pendingNavigation = target;
             await route.fulfill({status:200,contentType:'text/html',body:'<!doctype html><title>Redirecting</title>'});
@@ -170,6 +191,10 @@ export async function readSource(input, options = {}) {
     if (fatalNavigationError) throw fatalNavigationError;
     if (response && response.status() >= 400) fail('Source returned HTTP ' + response.status());
     await page.waitForTimeout(Math.max(0,Math.min(500,deadline-Date.now()-50)));
+    // Let XHR-rendered product data settle, then open in-page expanders (never links that navigate).
+    await page.waitForLoadState('networkidle',{timeout:Math.max(1,Math.min(5000,deadline-Date.now()-2000))}).catch(()=>{});
+    const expanded = await expandSections(page, Math.max(0,Math.min(4000,deadline-Date.now()-2000)));
+    if (expanded) warn('Expanded '+expanded+' collapsed section(s) before reading.');
     if (fatalNavigationError) throw fatalNavigationError;
     if (pendingNavigation) fail('Source redirected after initial rendering; retry its target directly');
     const finalUrl = await validate(page.url());

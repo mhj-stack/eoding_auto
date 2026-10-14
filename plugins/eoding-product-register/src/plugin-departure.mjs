@@ -93,6 +93,36 @@ export function createPluginDepartureAdapter({ assertIdentity, authorizeWrite, r
     await control.selectOption(value, { force: true });
     if (await control.inputValue() !== value) fail(`행사 선택값이 유지되지 않았습니다: ${name}`);
   }
+  // The event form inherits the master manager, and its manager control is a Select2 AJAX widget in
+  // the live ERP: only the inherited/selected employee is present as a native option. Accept the
+  // inherited value, a native option, or an exact Select2 search result, in that order.
+  async function chooseManager(page, managerId, managerLabel) {
+    const control = page.locator('#id_manager');
+    if (await control.count() !== 1) fail('행사 담당자 선택 칸을 찾을 수 없습니다.');
+    const state = () => control.evaluate((element, value) => ({ tag: element.tagName, disabled: element.disabled, current: element.value, native: [...element.options].filter(option => option.value === value && !option.disabled).length, ajax: Boolean(element.getAttribute('data-url')), id: element.id }), managerId);
+    try { await page.waitForFunction(() => document.querySelector('#id_manager')?.value !== '', undefined, { timeout: 3000 }); } catch {}
+    let observed = await state();
+    if (observed.tag !== 'SELECT' || observed.disabled) fail('행사 담당자 선택 칸 형식이 예상과 다릅니다.');
+    if (observed.current === managerId) return;
+    if (observed.native === 1) { await control.selectOption(managerId, { force: true }); }
+    else if (observed.ajax) {
+      if (typeof managerLabel !== 'string' || !managerLabel.trim()) fail('검증된 기본상품 담당자 이름이 없습니다.');
+      const rendered = page.locator(`[aria-labelledby="select2-${observed.id}-container"]`);
+      if (await rendered.count() !== 1) fail('행사 담당자 검색 칸을 찾을 수 없습니다.');
+      await rendered.click();
+      const results = page.locator(`#select2-${observed.id}-results[aria-expanded="true"]`);
+      const dropdown = page.locator('.select2-dropdown').filter({ has: results });
+      const search = dropdown.locator('input.select2-search__field');
+      if (await search.count() !== 1) fail('행사 담당자 검색 입력칸을 찾을 수 없습니다.');
+      await search.fill(managerLabel.replace(/\s*\([^()]*\)\s*$/, '').trim() || managerLabel);
+      const option = dropdown.getByRole('treeitem', { name: managerLabel, exact: true });
+      await option.first().waitFor({ state: 'visible', timeout: timeoutMs });
+      if (await option.count() !== 1) fail('행사 담당자 검색 결과가 없거나 여러 개입니다.');
+      await option.click();
+    } else fail('행사 선택값을 확인할 수 없습니다: manager');
+    observed = await state();
+    if (observed.current !== managerId) fail('행사 선택값이 유지되지 않았습니다: manager');
+  }
   const assertContext = (plan, context) => {
     if (!same(plan.target, context.targets) || !same(plan.approvalBinding, context.approvalBinding) || context.approvalClaim?.planDigest !== plan.approvalBinding.planDigest || context.approvalClaim?.scopeDigest !== plan.approvalBinding.scopeDigest || !same(context.approvalClaim.target, { mode: 'NEW' })) fail('행사 승인 범위 또는 대상이 변경됐습니다.');
     for (const name of ['basic', 'media', 'shell', ...plan.itinerary.map(day => `day:${day.day}`), 'season']) if (context.verifiedPreviousPhases.filter(item => item.name === name && item.verification).length !== 1) fail(`행사 생성 전 저장 확인이 필요합니다: ${name}`);
@@ -136,9 +166,10 @@ export function createPluginDepartureAdapter({ assertIdentity, authorizeWrite, r
         await choose(page, 'schedule', String(targets.scheduleId));
         await choose(page, 'season', season.seasonId);
         expected = departureExpected(plan, targets, season.seasonId);
-        const managerId = context.verifiedPreviousPhases.find(item => item.name === 'basic').receipt.managerValue;
+        const basicReceipt = context.verifiedPreviousPhases.find(item => item.name === 'basic').receipt;
+        const managerId = basicReceipt.managerValue;
         if (typeof managerId !== 'string' || !managerId.trim()) fail('검증된 기본상품 담당자 값이 없습니다.');
-        await choose(page, 'manager', managerId); expected.manager = managerId;
+        await chooseManager(page, managerId, basicReceipt.managerLabel); expected.manager = managerId;
         // Wait for the ERP's season-selection handler to finish before verifying every bound value.
         await page.waitForFunction(want => Object.entries(want).every(([name, value]) => {
           if (['master_product_id', 'title', 'status'].includes(name)) return true;
@@ -157,6 +188,17 @@ export function createPluginDepartureAdapter({ assertIdentity, authorizeWrite, r
         if (!matching[0].selected) await page.locator('#select-all-weekday').click();
         const dates = await page.locator('#multi-calendar button.datepicker-day-button.selected').evaluateAll(elements => elements.map(element => `${element.dataset.year}-${String(Number(element.dataset.month) + 1).padStart(2, '0')}-${String(element.dataset.day).padStart(2, '0')}`));
         if (!same(dates, [date])) fail('행사 달력은 승인한 날짜 1개만 선택해야 합니다.');
+        // The live ERP copies the season's flights into the event form but leaves the return
+        // leg's date blank. Fill only blank flight dates with the approved season value.
+        for (const name of ['depart-0-depart_date', 'arrive-0-depart_date']) {
+          const approved = plan.season.fields[name];
+          const control = page.locator(`#id_${name}`);
+          if (typeof approved !== 'string' || await control.count() !== 1) continue;
+          const current = await control.inputValue();
+          if (current === '') await control.evaluate((element, value) => { element.value = value; element.dispatchEvent(new Event('change', { bubbles: true })); }, approved);
+          else if (current !== approved) fail(`행사 항공 날짜가 승인과 다릅니다: ${name}`);
+          if (await control.inputValue() !== approved) fail(`행사 항공 날짜를 입력하지 못했습니다: ${name}`);
+        }
         prepared = await entries(page); assertDepartureForm(prepared, expected, '');
         await assertIdentity(page);
       } finally { await owner.unroute('**/*', readonly); }
