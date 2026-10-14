@@ -188,6 +188,17 @@ export function createPluginDepartureAdapter({ assertIdentity, authorizeWrite, r
         if (!matching[0].selected) await page.locator('#select-all-weekday').click();
         const dates = await page.locator('#multi-calendar button.datepicker-day-button.selected').evaluateAll(elements => elements.map(element => `${element.dataset.year}-${String(Number(element.dataset.month) + 1).padStart(2, '0')}-${String(element.dataset.day).padStart(2, '0')}`));
         if (!same(dates, [date])) fail('행사 달력은 승인한 날짜 1개만 선택해야 합니다.');
+        // The live ERP copies the season's flights into the event form but leaves the return
+        // leg's date blank. Fill only blank flight dates with the approved season value.
+        for (const name of ['depart-0-depart_date', 'arrive-0-depart_date']) {
+          const approved = plan.season.fields[name];
+          const control = page.locator(`#id_${name}`);
+          if (typeof approved !== 'string' || await control.count() !== 1) continue;
+          const current = await control.inputValue();
+          if (current === '') await control.evaluate((element, value) => { element.value = value; element.dispatchEvent(new Event('change', { bubbles: true })); }, approved);
+          else if (current !== approved) fail(`행사 항공 날짜가 승인과 다릅니다: ${name}`);
+          if (await control.inputValue() !== approved) fail(`행사 항공 날짜를 입력하지 못했습니다: ${name}`);
+        }
         prepared = await entries(page); assertDepartureForm(prepared, expected, '');
         await assertIdentity(page);
       } finally { await owner.unroute('**/*', readonly); }
