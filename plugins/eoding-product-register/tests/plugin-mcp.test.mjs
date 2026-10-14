@@ -29,7 +29,7 @@ test('portable MCP exposes scoped explicit delegation while preserving source an
     assert.deepEqual(approval.inputSchema.required.sort(),['accountName','companyId','delegation','id','planDigest','scope','scopeDigest'].sort());
     const caps = await call('product_import_capabilities');
     assert.equal(caps.requiresLlmApiKey, false);
-    assert.equal(caps.version, '0.2.0'); assert.equal(caps.setupTargetMs, 1200000); assert.equal(caps.timingIsGuarantee, false);
+    assert.equal(caps.version, '0.2.1'); assert.equal(caps.setupTargetMs, 1200000); assert.equal(caps.timingIsGuarantee, false);
     assert.ok(caps.scope.includes('optional-single-departure'));
     assert.equal(caps.liveEndToEndVerified, false);
     assert.equal(caps.requiresUserAuthorization,true);
