@@ -13,7 +13,7 @@ const dataDir = process.env.EODING_DATA_DIR || process.env.PLUGIN_DATA || path.j
 const python = path.join(dataDir, 'python', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
 if (!process.env.EODING_PYTHON && existsSync(python)) process.env.EODING_PYTHON = python;
 const runtime = new ProductImportPlugin({ dataDir, inputDir: process.env.EODING_INPUT_DIR });
-const server = new McpServer({ name: 'eoding-product-register', version: '0.2.0' });
+const server = new McpServer({ name: 'eoding-product-register', version: '0.2.1' });
 const id = z.string().uuid();
 const object = z.record(z.unknown());
 const readonly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
@@ -25,7 +25,7 @@ const safe = fn => async args => {
 };
 const register = (name, description, inputSchema, annotations, handler) => server.registerTool(name, { description, inputSchema, annotations }, safe(handler));
 register('product_import_capabilities', 'Read plugin scope, installation paths and the source → prepare → authorized review → result workflow.', {}, readonly, async () => ({
-  version: '0.2.0', transport: 'stdio', requiresLlmApiKey: false,
+  version: '0.2.1', transport: 'stdio', requiresLlmApiKey: false,
   scope: ['new-private-basic', 'display-images', 'detail-reference-content', 'schedule', 'all-days-meals', 'optional-season-prices-flight', 'optional-single-departure'],
   excluded: ['existing-product-overwrite', 'multiple-events', 'hotel-assignment', 'publish', 'sales-channel'],
   requiresUserAuthorization: true, approvalModes: ['human-form', 'explicit-user-delegation'], liveEndToEndVerified: false,
