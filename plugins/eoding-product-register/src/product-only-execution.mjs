@@ -46,7 +46,7 @@ const scopeFor = input => ({
   displayedSourceImages: input.display?.images?.map(image => image?.sourceImageId),
   itinerary: input.itinerary?.map(day => ({ day: day?.day, sourceRowId: day?.sourceRowId })),
   hasSeason: Boolean(input.season)
-  ,...(input.resumeFrom ? { resumeFrom: input.resumeFrom, remainingWrites: ['season', ...(input.departure?.create ? ['departure'] : [])] } : {})
+  ,...(input.resumeFrom ? { resumeFrom: input.resumeFrom, remainingWrites: input.resumeFrom.remaining?.[0] === 'departure' ? ['departure'] : ['season', ...(input.departure?.create ? ['departure'] : [])] } : {})
 });
 const planForDigest = input => {
   const result = clone(input);

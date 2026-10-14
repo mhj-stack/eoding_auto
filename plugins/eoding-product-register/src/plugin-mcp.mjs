@@ -13,7 +13,7 @@ const dataDir = process.env.EODING_DATA_DIR || process.env.PLUGIN_DATA || path.j
 const python = path.join(dataDir, 'python', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
 if (!process.env.EODING_PYTHON && existsSync(python)) process.env.EODING_PYTHON = python;
 const runtime = new ProductImportPlugin({ dataDir, inputDir: process.env.EODING_INPUT_DIR });
-const server = new McpServer({ name: 'eoding-product-register', version: '0.2.4' });
+const server = new McpServer({ name: 'eoding-product-register', version: '0.2.5' });
 const id = z.string().uuid();
 const object = z.record(z.unknown());
 const readonly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
@@ -25,7 +25,7 @@ const safe = fn => async args => {
 };
 const register = (name, description, inputSchema, annotations, handler) => server.registerTool(name, { description, inputSchema, annotations }, safe(handler));
 register('product_import_capabilities', 'Read plugin scope, installation paths and the source → prepare → authorized review → result workflow.', {}, readonly, async () => ({
-  version: '0.2.4', transport: 'stdio', requiresLlmApiKey: false,
+  version: '0.2.5', transport: 'stdio', requiresLlmApiKey: false,
   scope: ['new-private-basic', 'display-images', 'detail-reference-content', 'schedule', 'all-days-meals', 'optional-season-prices-flight', 'optional-single-departure'],
   excluded: ['existing-product-overwrite', 'multiple-events', 'hotel-assignment', 'publish', 'sales-channel'],
   requiresUserAuthorization: true, approvalModes: ['human-form', 'explicit-user-delegation'], liveEndToEndVerified: false,
@@ -60,7 +60,7 @@ register('product_import_wait', 'Record an actual user wait and end it with reas
 register('product_import_flight_minutes', 'Calculate flight duration from authoritative departure/arrival ISO datetimes with explicit timezone offsets. Never infer a timezone from local clock times alone.', {
   departureAt: z.string(), arrivalAt: z.string()
 }, readonly, args => ({ minutes: flightMinutes(args.departureAt, args.arrivalAt) }));
-register('product_import_resume', 'Prepare a single child job after basic/content/all days were verified and season preparation failed before any season authorization. Reuses the saved product after independent readback, never creates another basic product. Optional corrected season is reviewed again. Unknown or attempted season/event writes are blocked; preserve the original job.', {
+register('product_import_resume', 'Prepare a single child job after basic/content/all days were verified and either season preparation failed before any season authorization, or the season was verified and event preparation failed before any event write authorization (then only the event is created). Reuses the saved product after independent readback, never creates another basic product. Optional corrected season is reviewed again. Unknown or attempted season/event writes are blocked; preserve the original job.', {
   id, season: object.optional()
 }, local, args => runtime.resume(args));
 register('product_import_browser_open', 'Open the dedicated ERP login browser. The user logs in directly. Does not save products or expose credentials.', {}, { ...local, openWorldHint: true }, () => runtime.openBrowser());

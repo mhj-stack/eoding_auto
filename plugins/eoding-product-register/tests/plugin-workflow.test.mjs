@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { flightPreflight, flightMinutes, workflowTiming, changeWait, sourceQuality } from '../src/plugin-workflow.mjs';
 import { createProductOnlyApprovalBinding, ProductOnlyExecutionCoordinator } from '../src/product-only-execution.mjs';
 import { departurePreflight, departureExpected, assertDepartureForm } from '../src/plugin-departure.mjs';
-import { seasonResumeCheckpoint } from '../src/plugin-resume.mjs';
+import { seasonResumeCheckpoint, departureResumeCheckpoint, resumeCheckpoint } from '../src/plugin-resume.mjs';
 import { scopeFor } from '../src/product-only-review.mjs';
 
 const season = () => ({ fields: { 'depart-0-depart_date': '2026-11-01', 'depart-0-depart_time': '10:05', 'depart-0-arrive_time': '12:45', 'depart-0-moving_time': '160', 'arrive-0-depart_date': '2026-11-04', 'arrive-0-depart_time': '14:05', 'arrive-0-arrive_time': '17:30', 'arrive-0-moving_time': '205', currency_code: 'KRW', adult_base_price: '1078600', child_base_price: '1078600', infant_base_price: '107860', adult_fuel_price: '120400', child_fuel_price: '120400', infant_fuel_price: '0', min_pax_count: '10', max_pax_count: '10' }, selects: { departport: '1' }, selectedDates: ['2026-11-01'] });
@@ -73,4 +73,31 @@ test('resume accepts only a complete saved prefix before any season authorizatio
   assert.equal(seasonResumeCheckpoint(plan, events).targets.productId, 1);
   assert.throws(() => seasonResumeCheckpoint(plan, [...events, { kind: 'write-authorized', event: { phase: 'season' } }]), /독립 재조회/);
   assert.throws(() => seasonResumeCheckpoint(plan, events.filter(item => item.value?.phase !== 'day:1')), /모든 일차/);
+});
+
+test('event form accepts the live ERP calendar date already copied into selected_dates', () => {
+  const plan = { product: { title: '가상 상품', currency: 'KRW' }, season: season(), departure: { create: true, status: '3' } };
+  const expected = departureExpected(plan, { productId: 123, scheduleId: 456 }, '789');
+  assertDepartureForm(Object.entries({ ...expected, selected_dates: '' }), expected, '');
+  assertDepartureForm(Object.entries({ ...expected, selected_dates: '2026-11-01' }), expected, '2026-11-01');
+  assert.throws(() => assertDepartureForm(Object.entries({ ...expected, selected_dates: '2026-11-01,2026-11-02' }), expected, '2026-11-01'), /selected_dates.*실제/);
+});
+
+test('departure-only resume needs a verified season and no departure write attempt', () => {
+  const plan = { target: { mode: 'NEW' }, itinerary: [{ day: 1, sourceRowId: 'r' }], product: {}, source: { rows: [], images: [] }, display: { images: [] }, season: {}, departure: { create: true, status: '3' } };
+  plan.approvalBinding = createProductOnlyApprovalBinding(plan);
+  const events = [{ kind: 'human-approval', approval: plan.approvalBinding }, { kind: 'approval-claim', claim: plan.approvalBinding }];
+  for (const phase of ['basic', 'media', 'shell', 'day:1', 'season']) {
+    const receipt = phase === 'season' ? { kind: 'season-save-receipt-v1', seasonId: '77', target: { productId: '1' } } : { productId: 1, masterCode: 'CODE', scheduleId: 2, ...(phase.startsWith('day') ? { day: 1 } : {}) };
+    events.push({ kind: 'coordinator-evidence', value: { status: 'before-write', phase } });
+    events.push({ kind: 'write-authorized', event: { phase, prepared: { before: {} } } });
+    events.push({ kind: 'coordinator-evidence', value: { status: 'receipt-verified', phase, result: { name: phase, verification: true, receipt } } });
+  }
+  events.push({ kind: 'coordinator-evidence', value: { status: 'before-write', phase: 'departure' } }, { kind: 'coordinator-evidence', value: { status: 'unknown-save-outcome', phase: 'departure' } });
+  const seed = resumeCheckpoint(plan, events);
+  assert.deepEqual(seed.remaining, ['departure']); assert.equal(seed.checkpoint.season.seasonId, '77'); assert.equal(seed.results.length, 5);
+  assert.deepEqual(scopeFor({ ...plan, resumeFrom: { remaining: seed.remaining } }), ['departure']);
+  assert.throws(() => resumeCheckpoint(plan, [...events.slice(0, -1), { kind: 'write-authorized', event: { phase: 'departure' } }, events.at(-1)]), /독립 재조회/);
+  assert.throws(() => resumeCheckpoint(plan, [...events.slice(0, -1), { kind: 'adapter-evidence', event: { phase: 'departure', kind: 'departure-before-post' } }, events.at(-1)]), /독립 재조회/);
+  assert.throws(() => departureResumeCheckpoint(plan, events.filter(item => item.value?.phase !== 'season' || item.value.status !== 'receipt-verified')), /시즌/);
 });

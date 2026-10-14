@@ -35,7 +35,7 @@ export function assertDepartureForm(entries, expected, selectedDate) {
   for (const [name, value] of Object.entries({ ...expected, selected_dates: selectedDate })) {
     const values = entries.filter(([key]) => key === name).map(([, item]) => priceNames.includes(name) ? money(item) : item);
     // Native ERP repeats master_product_id; every copy must bind the same target.
-    if (!values.length || (name !== 'master_product_id' && values.length !== 1) || values.some(item => item !== value)) fail(`행사 폼 값이 승인과 다릅니다: ${name}`);
+    if (!values.length || (name !== 'master_product_id' && values.length !== 1) || values.some(item => item !== value)) fail(`행사 폼 값이 승인과 다릅니다: ${name} (기대 ${JSON.stringify(value)}, 실제 ${JSON.stringify(values)})`);
   }
 }
 
@@ -222,7 +222,13 @@ export function createPluginDepartureAdapter({ assertIdentity, authorizeWrite, r
           else if (current !== approved) fail(`행사 항공 날짜가 승인과 다릅니다: ${name}`);
           if (await control.inputValue() !== approved) fail(`행사 항공 날짜를 입력하지 못했습니다: ${name}`);
         }
-        prepared = await entries(page); assertDepartureForm(prepared, expected, '');
+        // The live ERP writes the calendar selection into the hidden selected_dates field as soon as a
+        // day is picked (JWC5015/OKA0000), while older pages leave it blank until create. Accept only
+        // blank or exactly the one approved date; anything else is a conflicting calendar.
+        prepared = await entries(page);
+        const hiddenDates = prepared.filter(([key]) => key === 'selected_dates').map(([, value]) => value);
+        if (hiddenDates.length !== 1 || !['', date].includes(hiddenDates[0])) fail(`행사 출발일 칸이 승인과 다릅니다: selected_dates (기대 "" 또는 "${date}", 실제 ${JSON.stringify(hiddenDates)})`);
+        assertDepartureForm(prepared, expected, hiddenDates[0]);
         await assertIdentity(page);
       } finally { await owner.unroute('**/*', readonly); }
       const postEntries = prepared.map(([key, value]) => [key, key === 'selected_dates' ? plan.season.selectedDates[0] : priceNames.includes(key) ? money(value) : value]);
