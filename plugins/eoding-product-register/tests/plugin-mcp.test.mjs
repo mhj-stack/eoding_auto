@@ -34,7 +34,7 @@ test('portable MCP exposes scoped explicit delegation while preserving source an
     assert.deepEqual(approval.inputSchema.required.sort(),['accountName','companyId','delegation','id','planDigest','scope','scopeDigest'].sort());
     const caps = await call('product_import_capabilities');
     assert.equal(caps.requiresLlmApiKey, false);
-    assert.equal(caps.version, '0.4.0'); assert.equal(caps.setupTargetMs, 1200000); assert.equal(caps.timingIsGuarantee, false);
+    assert.equal(caps.version, '0.4.1'); assert.equal(caps.setupTargetMs, 1200000); assert.equal(caps.timingIsGuarantee, false);
     assert.ok(caps.scope.includes('optional-single-departure'));
     assert.equal(caps.liveEndToEndVerified, false);
     assert.equal(caps.requiresUserAuthorization,true);
@@ -44,6 +44,8 @@ test('portable MCP exposes scoped explicit delegation while preserving source an
     assert.match((await call('product_fit_schema')).instructions, /자유여행\(FIT\) 등록 형식/);
     assert.ok(caps.fitWorkflow.includes('product_fit_review'));
     assert.ok(caps.contentWorkflow.includes('product_content_review'));
+    assert.ok(caps.contentWorkflow.includes('product_import_get (compact:true).contents'));
+    for (const mode of ['bounded-content-review', 'background-content-progress', 'all-skills-runtime-cache']) assert.ok(caps.optimizations.includes(mode));
     assert.match((await call('product_content_schema')).instructions, /ERP 콘텐츠 등록 형식/);
     const schema = await call('product_import_schema');
     const job = await call('product_import_source', { text: '사용자가 제공한 가상 상품자료', seasonMode: 'excluded' });

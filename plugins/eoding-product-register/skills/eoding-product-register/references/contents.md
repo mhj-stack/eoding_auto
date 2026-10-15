@@ -8,7 +8,8 @@
 2. **사진은 찾아오지 않는다.** 원문·사용자 자료에 그 콘텐츠의 사진이 있으면 `product_import_images`로 모아 `images`에 넣고, 없으면 `images`를 생략한다. 업체 로고가 박힌 광고 이미지는 넣지 않는다. 사진을 이름에 확신 없이 짝짓지 않는다.
 3. `product_import_lookups`로 도시 표시명(예: `아유타야(AUB)`)을 확인한다.
 4. `product_content_prepare({id, contents})` → `product_content_review({id})`로 기존 재사용/신규 생성과 사진 유무 요약을 사용자에게 보여준다.
-5. 사용자가 등록을 지시했거나 맡겼으면 `product_content_register({id, companyId, accountName, planDigest, delegation:{explicitUserRequest:true, userInstruction:'사용자 원문'}})`. 결과의 `created/reused/withoutPhotos`를 보고한다. 실패하면 원인을 고치고 같은 호출로 이어서 진행한다(장부 기반, 중복 없음).
+5. 사용자가 같은 범위의 등록을 지시했거나 맡겼으면 추가 승인 질문 없이 `product_content_register({id, companyId, accountName, planDigest, delegation:{explicitUserRequest:true, userInstruction:'직접 사용자의 원문'}})`. 즉시 `status='running'`을 반환하고 백그라운드로 실행한다.
+6. `product_import_get({id,compact:true}).contents`의 `stage`, `completedCount`, `count`로 진행을 확인한다. `status='completed'`에서 `results/created/reused/withoutPhotos/durationMs`를 보고한다. 실패·중단 후 같은 호출은 장부와 현재 검색 결과를 먼저 대조한다. 저장 시도한 항목이 재조회되지 않거나 기존 번호가 다르면 자동 재생성을 차단한다. 결과가 불명확한 쓰기는 새 작업으로 우회하지 않는다.
 
 ## contents 항목
 
