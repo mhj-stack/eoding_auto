@@ -11,13 +11,13 @@ const fail = message => { throw new Error(message); };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const ID = /^[1-9][0-9]{0,12}$/;
 
-async function onErp(page) {
+export async function onErp(page) {
   const url = new URL(page.url());
   if (url.origin !== FIT_ORIGIN) await page.goto(FIT_ORIGIN + '/fit/master/', { waitUntil: 'domcontentloaded', timeout: 30000 });
 }
 
 /** Same-origin GET returning JSON (datatable lists need the datatable header). */
-async function getJson(page, url, datatable = false) {
+export async function getJson(page, url, datatable = false) {
   return page.evaluate(async ({ url, datatable }) => {
     const response = await fetch(url, { credentials: 'same-origin', cache: 'no-store', redirect: 'error', headers: datatable ? { datatable: 'true', 'X-Requested-With': 'XMLHttpRequest' } : {} });
     if (response.status !== 200) throw new Error(`ERP 조회 실패 ${response.status}: ${url}`);
@@ -31,7 +31,7 @@ async function getHtml(page, url) {
     return response.text();
   }, url);
 }
-async function post(page, url, { json, fields }) {
+export async function post(page, url, { json, fields }) {
   return page.evaluate(async ({ url, json, fields }) => {
     const token = document.cookie.split('; ').find(item => item.startsWith('csrftoken='))?.slice(10) ?? '';
     const headers = { 'X-CSRFToken': token, 'X-Requested-With': 'XMLHttpRequest' };
@@ -89,7 +89,7 @@ export async function resolveFit(page, plan) {
 
 // ---------- write stages ----------
 
-async function uploadImage(page, image, alt) {
+export async function uploadImage(page, image, alt) {
   const bytes = await readFile(image.path);
   if (createHash('sha256').update(bytes).digest('hex') !== image.sha256) fail(`수집한 이미지 파일이 변경됐습니다: ${image.id}`);
   return page.evaluate(async ({ b64, name, type, alt }) => {

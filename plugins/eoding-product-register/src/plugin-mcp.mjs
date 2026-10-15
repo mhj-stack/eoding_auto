@@ -13,7 +13,7 @@ const dataDir = process.env.EODING_DATA_DIR || process.env.PLUGIN_DATA || path.j
 const python = path.join(dataDir, 'python', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
 if (!process.env.EODING_PYTHON && existsSync(python)) process.env.EODING_PYTHON = python;
 const runtime = new ProductImportPlugin({ dataDir, inputDir: process.env.EODING_INPUT_DIR });
-const server = new McpServer({ name: 'eoding-product-register', version: '0.3.0' });
+const server = new McpServer({ name: 'eoding-product-register', version: '0.4.0' });
 const id = z.string().uuid();
 const object = z.record(z.unknown());
 const readonly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
@@ -25,8 +25,8 @@ const safe = fn => async args => {
 };
 const register = (name, description, inputSchema, annotations, handler) => server.registerTool(name, { description, inputSchema, annotations }, safe(handler));
 register('product_import_capabilities', 'Read plugin scope, installation paths and the source → prepare → authorized review → result workflow.', {}, readonly, async () => ({
-  version: '0.3.0', transport: 'stdio', requiresLlmApiKey: false,
-  scope: ['new-private-basic', 'display-images', 'detail-reference-content', 'schedule', 'all-days-meals', 'optional-season-prices-flight', 'optional-single-departure', 'fit-private-product-options-sales-contents'],
+  version: '0.4.0', transport: 'stdio', requiresLlmApiKey: false,
+  scope: ['new-private-basic', 'display-images', 'detail-reference-content', 'schedule', 'all-days-meals', 'optional-season-prices-flight', 'optional-single-departure', 'fit-private-product-options-sales-contents', 'erp-contents-place-meal-shopping-optionaltour-meeting'],
   excluded: ['existing-product-overwrite', 'multiple-events', 'hotel-assignment', 'publish', 'sales-channel'],
   requiresUserAuthorization: true, approvalModes: ['human-form', 'explicit-user-delegation'], liveEndToEndVerified: false,
   setupTargetMs: SETUP_TARGET_MS, timingIncludes: ['source-collection', 'AI-coordination', 'user-waits', 'ERP-writes', 'independent-readback'], timingIsGuarantee: false,
@@ -34,6 +34,7 @@ register('product_import_capabilities', 'Read plugin scope, installation paths a
   inputDir: runtime.inputDir,
   workflow: ['product_import_schema (once per connected version)', 'product_import_context', 'product_import_source', 'product_import_images', 'product_import_lookups', 'product_import_prepare', 'product_import_review', 'product_import_approve (only when explicitly delegated)', 'product_import_get (compact:true)'],
   fitWorkflow: ['product_fit_schema', 'product_import_source', 'product_import_images', 'product_import_lookups', 'product_fit_prepare', 'product_fit_review', 'product_fit_register (user instruction required)', 'product_import_get (compact:true).fit'],
+  contentWorkflow: ['product_content_schema', 'product_import_source', 'product_import_images (only photos present in the source)', 'product_import_lookups', 'product_content_prepare', 'product_content_review', 'product_content_register (user instruction required)'],
   authorization: { required: true, reuseExplicitUserDelegation: true, separateUserConfirmationWhenDelegated: false },
   notice: 'The connected AI interprets sources and prepares the full scope. If the user already delegated approval submission, review internally and immediately call product_import_approve with that direct human instruction; do not ask again. Never ask users for JSON or approve every day. Installation is not live ERP acceptance.'
 }));
@@ -95,6 +96,19 @@ register('product_fit_register', 'Start the reviewed FIT ERP writes (images → 
   id, companyId: z.string().min(1), accountName: z.string().min(1), planDigest: z.string().regex(/^[a-f0-9]{64}$/),
   delegation: z.object({ explicitUserRequest: z.literal(true), userInstruction: z.string().min(1).max(2000) }).strict()
 }, { ...local, destructiveHint: true, openWorldHint: true }, args => runtime.fitRegister(args));
+register('product_content_schema', 'Read the ERP content (관광지 place, 식당 meal, 쇼핑 shopping, 선택관광 optionaltour, 미팅장소 meeting) format and rules before preparing contents.', {}, readonly, async () => ({
+  instructions: await readFile(new URL('../skills/eoding-product-register/references/contents.md', import.meta.url), 'utf8')
+}));
+register('product_content_prepare', 'Validate and persist 1-50 ERP contents on a source job. Photos are optional and only from images collected on this job; never search for photos. Never saves ERP.', {
+  id, contents: z.array(object).min(1).max(50)
+}, local, args => runtime.contentPrepare(args));
+register('product_content_review', 'Read-only content review: resolve exact cities and find existing same-type/city/name contents to reuse in the logged-in dedicated browser. Returns a Korean summary and planDigest. Never saves ERP.', {
+  id
+}, { ...local, openWorldHint: true }, args => runtime.contentReview(args));
+register('product_content_register', 'Create only the missing reviewed contents (reusing exact existing ones) with their source photos, each confirmed by an independent search. Requires the review binding and a direct user instruction that asked for or delegated registration. Re-running continues from the journal without duplicates.', {
+  id, companyId: z.string().min(1), accountName: z.string().min(1), planDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  delegation: z.object({ explicitUserRequest: z.literal(true), userInstruction: z.string().min(1).max(2000) }).strict()
+}, { ...local, destructiveHint: true, openWorldHint: true }, args => runtime.contentRegister(args));
 register('product_import_get','Read job status, progress and independently verified saved links. Prefer compact:true for polling to omit repeated source/image metadata; includeSource:true remains available for full evidence. Submission is not completion. Uncertain writes require reconciliation, never a new create attempt.', {
   id, includeSource: z.boolean().optional(), compact: z.boolean().optional()
 }, readonly, args => runtime.get(args));
