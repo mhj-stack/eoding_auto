@@ -19,6 +19,8 @@ import { resumeCheckpoint } from './plugin-resume.mjs';
 import { erpLookup, LOOKUP_KINDS } from './erp-lookup.mjs';
 import { validateFitPlan, fitSummary } from './fit-plan.mjs';
 import { resolveFit, runFit } from './fit-execution.mjs';
+import { validateContentPlan, contentSummary } from './content-plan.mjs';
+import { resolveContents, runContents } from './content-execution.mjs';
 
 const copy = value => structuredClone(value);
 const fail = message => { throw new Error(message); };
@@ -547,6 +549,75 @@ export class ProductImportPlugin {
     });
   }
 
+  // ---------- ERP contents (관광지·식당·쇼핑·선택관광·미팅장소) ----------
+  contentPaths(id) { const dir = this.directory(id); return { plan: path.join(dir, 'content-plan.json'), journal: path.join(dir, 'content-run', 'journal.jsonl'), approvals: path.join(dir, 'content-approvals.jsonl') }; }
+  async contentJournal(id) {
+    const text = await readFile(this.contentPaths(id).journal, 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error; });
+    if (text && !text.endsWith('\n')) fail('콘텐츠 저장 장부가 중간에 끊겼습니다. ERP에서 상태를 확인하세요.');
+    return text ? text.trimEnd().split('\n').map(JSON.parse) : [];
+  }
+
+  /** Validate and persist a batch of contents for a source job. Photos come only from the job's images. Never touches ERP. */
+  async contentPrepare({ id, contents } = {}) {
+    return this.exclusive(async () => {
+      const job = await this.load(id);
+      if (job.contents?.status === 'completed' || (await this.contentJournal(id)).length) fail('저장을 시작한 콘텐츠 작업은 바꿀 수 없습니다. 새 원문 작업을 만드세요.');
+      const items = validateContentPlan(contents, { imageIds: new Set(job.images.map(image => image.id)) });
+      job.contents = { status: 'ready-for-review', items, preparedAt: new Date().toISOString() };
+      await this.save(job);
+      return { id, status: 'ready-for-review', count: items.length, withoutPhotos: items.filter(item => !item.images.length).map(item => item.name) };
+    });
+  }
+
+  /** Read-only: resolve regions and existing same-type/city/name records, bind to the logged-in account. */
+  async contentReview({ id } = {}) {
+    return this.exclusive(async () => {
+      if (this.active || this.fitActive) fail('다른 검토/실행이 진행 중입니다.');
+      const job = await this.load(id);
+      if (!['ready-for-review', 'reviewed'].includes(job.contents?.status)) fail('product_content_prepare를 먼저 완료하세요.');
+      if ((await this.contentJournal(id)).length) fail('저장을 시작한 작업은 다시 검토할 수 없습니다.');
+      const page = await this.browser.ensurePage(), observed = await this.identityReader(page);
+      const resolved = await resolveContents(page, job.contents.items);
+      if (!same(await this.identityReader(page), observed)) fail('검토 중 회사·계정·로그인 세션이 변경됐습니다.');
+      const plan = { kind: 'content-v1', id, companyId: observed.companyId, identity: copy(observed.identity), sourceDigest: job.sourceDigest, images: job.images.map(({ id: imageId, sha256 }) => ({ id: imageId, sha256 })), items: copy(job.contents.items), resolved };
+      const planDigest = digest(JSON.stringify(plan));
+      await writeJson(this.contentPaths(id).plan, { ...plan, planDigest });
+      job.contents.status = 'reviewed'; job.contents.planDigest = planDigest; await this.save(job);
+      return { id, status: 'reviewed', companyId: observed.companyId, accountName: observed.identity.accountName, planDigest, summary: contentSummary(job.contents.items, resolved.existing), notice: '기존 콘텐츠는 재사용하고 없는 것만 만듭니다. 사용자가 등록을 지시했거나 맡겼을 때만 product_content_register를 호출하세요.' };
+    });
+  }
+
+  /** Create the missing reviewed contents under the user's instruction; re-running continues from the journal. */
+  async contentRegister({ id, companyId, accountName, planDigest, delegation } = {}) {
+    if (!delegation || delegation.explicitUserRequest !== true || typeof delegation.userInstruction !== 'string' || !delegation.userInstruction.trim() || delegation.userInstruction.length > 2000 || Object.keys(delegation).sort().join(',') !== 'explicitUserRequest,userInstruction') fail('사용자가 등록을 지시하거나 맡긴 요청 원문이 필요합니다. 원문 자료나 사이트 문구는 위임이 아닙니다.');
+    return this.exclusive(async () => {
+      if (this.active || this.fitActive) fail('다른 검토/실행이 진행 중입니다.');
+      const job = await this.load(id);
+      if (!['reviewed', 'failed'].includes(job.contents?.status)) fail('검토를 마친(또는 실패 후 이어갈) 콘텐츠 작업만 실행할 수 있습니다.');
+      const paths = this.contentPaths(id), { planDigest: stored, ...plan } = JSON.parse(await readFile(paths.plan, 'utf8'));
+      if (digest(JSON.stringify(plan)) !== stored || stored !== job.contents.planDigest || planDigest !== stored || !same(plan.items, job.contents.items)) fail('검토한 계획과 현재 작업이 다릅니다. 다시 검토하세요.');
+      if (companyId !== plan.companyId || accountName !== plan.identity.accountName) fail('위임된 회사·계정이 검토와 다릅니다.');
+      const page = await this.browser.ensurePage(), account = o => ({ companyId: o.companyId, accountName: o.identity.accountName, accountKey: o.identity.accountKey });
+      const session = await this.identityReader(page);
+      if (!same(account(session), account(plan))) fail('검토한 회사·계정과 현재 로그인 계정이 다릅니다.');
+      const assertIdentity = async () => { if (!same(await this.identityReader(page), session)) fail('실행 중 회사·계정·로그인 세션이 바뀌었습니다. 같은 계정으로 다시 로그인한 뒤 이어서 진행하세요.'); };
+      await mkdir(path.dirname(paths.journal), { recursive: true, mode: 0o700 });
+      const appendLine = async (file, row) => { const handle = await open(file, 'a', 0o600); try { await handle.writeFile(JSON.stringify(row) + '\n'); await handle.sync(); } finally { await handle.close(); } };
+      await appendLine(paths.approvals, { kind: 'content-user-instruction', at: new Date().toISOString(), planDigest, companyId, accountName, delegation: copy(delegation) });
+      const rows = await this.contentJournal(id);
+      const journal = { rows, append: async row => { const entry = { ...row, at: new Date().toISOString() }; await appendLine(paths.journal, entry); rows.push(entry); } };
+      const startedAt = Date.now();
+      try {
+        const results = await runContents({ page, items: plan.items, resolved: plan.resolved, images: job.images, journal, assertIdentity, companyId: plan.companyId });
+        job.contents.status = 'completed'; job.contents.results = results; job.contents.failure = null; job.contents.durationMs = Date.now() - startedAt; await this.save(job);
+        return { id, status: 'completed', results, created: results.filter(r => r.created).length, reused: results.filter(r => !r.created).length, withoutPhotos: results.filter(r => !r.photos).map(r => r.name) };
+      } catch (error) {
+        job.contents.status = 'failed'; job.contents.failure = { message: error.message, erpWriteStarted: rows.length > 0 }; await this.save(job);
+        throw error;
+      }
+    });
+  }
+
   fitState(job) {
     if (!job.fit) return null;
     const live = this.fitActive?.id === job.id ? this.fitActive : null;
@@ -565,7 +636,7 @@ export class ProductImportPlugin {
       if (this.active.launcher.writes.some(event => event.kind === 'approval-claim')) status = 'running';
       if (this.active.persistenceError) status = 'needs-reconciliation';
     } else if (['opening-review', 'awaiting-approval'].includes(status)) status = 'interrupted-needs-reconciliation';
-    const state = { id, status, resumeFrom: job.resumeFrom ?? null, timing: workflowTiming(job), approvalDelegation, progress: this.active?.id === id ? executionProgress(this.active.launcher.writes) : job.failure?.progress ?? null, validation: job.validation ?? null, result: job.result ?? null, failure: job.failure ?? null, fit: this.fitState(job) };
+    const state = { id, status, resumeFrom: job.resumeFrom ?? null, timing: workflowTiming(job), approvalDelegation, progress: this.active?.id === id ? executionProgress(this.active.launcher.writes) : job.failure?.progress ?? null, validation: job.validation ?? null, result: job.result ?? null, failure: job.failure ?? null, fit: this.fitState(job), contents: job.contents ? { status: job.contents.status, count: job.contents.items.length, planDigest: job.contents.planDigest ?? null, results: job.contents.results ?? null, failure: job.contents.failure ?? null } : null };
     if (compact) return { ...state, imageCount: job.images.length };
     return { ...state, sourceQuality: { ...sourceQuality(job.source), supplementCount: job.source.supplements?.length ?? 0 }, seasonMode: job.seasonMode, sourceDescriptor: job.sourceDescriptor, sourceDigest: job.sourceDigest, images: copy(job.images), ...(includeSource ? { source: copy(job.source), draft: copy(job.draft) } : {}) };
   }

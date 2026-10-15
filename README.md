@@ -1,4 +1,6 @@
-# 어딩 상품등록기 0.3.0
+# 어딩 상품등록기 0.4.0
+
+0.4.0: ERP 콘텐츠 등록을 추가했습니다(별도 스킬 `eoding-content-register`, 같은 전용 브라우저·로그인). 관광지·식당·쇼핑·선택관광·미팅장소를 같은 도시·이름이 있으면 재사용하고 없는 것만 만든 뒤 재조회합니다. 사진은 찾아오지 않고 원문에 있을 때만 넣습니다. 선택관광 요금·결제·가이드 동행과 쇼핑 환불 조건은 원문 근거가 있을 때만 받습니다(`product_content_schema` → `product_content_prepare` → `product_content_review` → `product_content_register`).
 
 0.3.0: 자유여행(FIT) 상품 등록을 추가했습니다. 투어·티켓·체험·호텔 상품을 비공개로 만들고 대표/상세 이미지, 관광지 콘텐츠(재사용 또는 생성), 옵션·가격구분, 기간별 판매일·원가/판매가, 사진 중심 참조정보, 관광지 콘텐츠를 연결한 일정표, 취소·환불 약관까지 저장한 뒤 단계별로 재조회합니다(`product_fit_schema` → `product_fit_prepare` → `product_fit_review` → `product_fit_register`). 중단되면 장부를 기준으로 이어서 진행하며 중복 생성하지 않습니다.
 
