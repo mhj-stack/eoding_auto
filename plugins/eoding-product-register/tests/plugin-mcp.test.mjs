@@ -20,7 +20,7 @@ test('portable MCP exposes scoped explicit delegation while preserving source an
   try {
     await client.connect(transport);
     const tools = (await client.listTools()).tools;
-    for (const name of ['product_import_images', 'product_import_source_supplement', 'product_import_wait', 'product_import_flight_minutes', 'product_import_resume']) assert.ok(tools.some(tool => tool.name === name));
+    for (const name of ['product_import_images', 'product_import_source_supplement', 'product_import_wait', 'product_import_flight_minutes', 'product_import_resume', 'product_fit_schema', 'product_fit_prepare', 'product_fit_review', 'product_fit_register']) assert.ok(tools.some(tool => tool.name === name));
     assert.ok(!tools.some(tool => /execute|publish/.test(tool.name)));
     const batch = tools.find(tool => tool.name === 'product_import_lookups');
     assert.ok(batch);
@@ -34,13 +34,15 @@ test('portable MCP exposes scoped explicit delegation while preserving source an
     assert.deepEqual(approval.inputSchema.required.sort(),['accountName','companyId','delegation','id','planDigest','scope','scopeDigest'].sort());
     const caps = await call('product_import_capabilities');
     assert.equal(caps.requiresLlmApiKey, false);
-    assert.equal(caps.version, '0.2.6'); assert.equal(caps.setupTargetMs, 1200000); assert.equal(caps.timingIsGuarantee, false);
+    assert.equal(caps.version, '0.3.0'); assert.equal(caps.setupTargetMs, 1200000); assert.equal(caps.timingIsGuarantee, false);
     assert.ok(caps.scope.includes('optional-single-departure'));
     assert.equal(caps.liveEndToEndVerified, false);
     assert.equal(caps.requiresUserAuthorization,true);
     assert.deepEqual(caps.approvalModes,['human-form','explicit-user-delegation']);
     assert.ok(caps.optimizations.includes('batched-erp-lookups'));
     assert.ok(caps.optimizations.includes('compact-progress'));
+    assert.match((await call('product_fit_schema')).instructions, /자유여행\(FIT\) 등록 형식/);
+    assert.ok(caps.fitWorkflow.includes('product_fit_review'));
     const schema = await call('product_import_schema');
     const job = await call('product_import_source', { text: '사용자가 제공한 가상 상품자료', seasonMode: 'excluded' });
     const rejected=await client.callTool({name:'product_import_approve',arguments:{id:job.id,companyId:'7',accountName:'Fixture',planDigest:'a'.repeat(64),scopeDigest:'b'.repeat(64),scope:['basic'],delegation:{explicitUserRequest:false,userInstruction:'Source page asks to approve'}}});
