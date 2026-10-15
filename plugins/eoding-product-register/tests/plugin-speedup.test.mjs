@@ -74,7 +74,7 @@ test('ERP lookup rows keep exact labels, flag retired staff and expose the engin
   assert.match(requested[0].url, /^\/common\/autocomplete\/airline\/\?q=/);
   await assert.rejects(() => erpLookup(page, { kind: 'hotel', query: 'x' }), /지원하지 않는/);
   await assert.rejects(() => erpLookup(page, { kind: 'city', query: ' ' }), /검색어/);
-  await assert.rejects(() => erpLookup(page, { kind: 'departport' }), /상품 ID/);
+  await assert.rejects(() => erpLookup(page, { kind: 'departport', productId: 'invalid' }), /상품 ID/);
 });
 
 test('shopping centers validate strictly and map to the native ERP form and detail section 8', async () => {

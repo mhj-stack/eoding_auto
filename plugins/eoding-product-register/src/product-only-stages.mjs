@@ -6,6 +6,7 @@ import {ScheduleDayDraft} from './schedule-day.mjs';
 import {readScheduleList} from './schedule-read.mjs';
 import {readScheduleDetail,verifyPlainDayPersistence} from './schedule-detail-read.mjs';
 import {digest} from './core.mjs';
+import {claimFreshNativeProductRead} from './product-content-final-read.mjs';
 const copy=x=>structuredClone(x);
 const fail=m=>{throw Error(m)};
 const id=x=>typeof x==='string'&&/^[1-9]\d{0,9}$/.test(x);
@@ -153,7 +154,7 @@ export function createProductOnlyStageAdapters({identity,authorizeWrite,record,b
      return {status:'saved-basic-schedule-reconciled',basic:persisted,list,detail};
     }finally{await owner.unroute('**/*',guard);await cdp?.detach().catch(()=>{});}
    },
-  async readFinal(page,plan,context){
+  async readFinal(page,plan,context,{freshProductRead}={}){
    check(plan,context);await currentIdentity(page,plan);
    const basic=dependency(context,'basic'),shell=dependency(context,'shell');
    for(const day of plan.itinerary)dependency(context,`day:${day.day}`);
@@ -161,8 +162,13 @@ export function createProductOnlyStageAdapters({identity,authorizeWrite,record,b
    const owner=page.context(),guard=r=>['GET','HEAD'].includes(r.request().method())?r.fallback():r.abort();await owner.route('**/*',guard);let cdp;
    try{
     cdp=await owner.newCDPSession(page);await cdp.send('Network.enable');await cdp.send('Network.setCacheDisabled',{cacheDisabled:true});await cdp.send('Network.setBypassServiceWorker',{bypass:true});
-    const response=await page.goto(`https://basecamp.team/tour/master_product/${basic.productId}/change/`,{waitUntil:'domcontentloaded'});
-    if(response?.status()!==200||response.fromServiceWorker()||response.url()!==`https://basecamp.team/tour/master_product/${basic.productId}/change/`)fail('Final basic GET changed');
+    const pageUrl=`https://basecamp.team/tour/master_product/${basic.productId}/change/`;
+    let assertFresh;
+    if(freshProductRead!==undefined)assertFresh=await claimFreshNativeProductRead(page,freshProductRead,pageUrl);
+    else{
+     const response=await page.goto(pageUrl,{waitUntil:'domcontentloaded'});
+     if(response?.status()!==200||response.fromServiceWorker()||response.url()!==pageUrl)fail('Final basic GET changed');
+    }
     const persisted=await low.basic.read(page),{productId,...expected}=basic;
     if(!same(persisted,expected))fail('Final basic values changed');
     const list=await readScheduleList(page,{productId:basic.productId});
@@ -170,7 +176,7 @@ export function createProductOnlyStageAdapters({identity,authorizeWrite,record,b
     if(list.schedules.length!==expectedList.length||expectedList.some(r=>!list.schedules.some(v=>same(r,v))))fail('Final schedule membership changed');
     const detail=await readScheduleDetail(page,{productId:basic.productId,scheduleId:shell.scheduleId});
     if(!same(detail,states.get(`day:${plan.itinerary.length}`).after))fail('Final schedule content changed');
-    await currentIdentity(page,plan);return {status:'basic-schedule-reverified',basic:persisted,list,detail};
+    await currentIdentity(page,plan);if(assertFresh)await assertFresh();return {status:'basic-schedule-reverified',basic:persisted,list,detail};
    }finally{await owner.unroute('**/*',guard);await cdp?.detach().catch(()=>{});}
   }
  };

@@ -1,10 +1,23 @@
 import {isDeepStrictEqual as same} from 'node:util';
 import {parseDisplayMultipart,readDisplayImageState} from './display-image.mjs';
 const fail=m=>{throw Error(m)};
+const freshProductReads=new WeakMap();
+/** Internal, single-use proof of the exact fresh document held by the native reader. */
+export async function claimFreshNativeProductRead(page,proof,pageUrl){
+ const fresh=freshProductReads.get(proof);
+ if(!fresh||!fresh.active||fresh.used||fresh.page!==page||fresh.owner!==page.context()||fresh.pageUrl!==pageUrl)fail('Invalid fresh native product read proof');
+ fresh.used=true;
+ const assertCurrent=async()=>{
+  let current=false;try{current=await fresh.document.evaluate(document=>document===globalThis.document);}catch{}
+  if(!fresh.active||page.context()!==fresh.owner||page.url()!==pageUrl||!current)fail('Fresh native product document changed');
+ };
+ await assertCurrent();return assertCurrent;
+}
 /** Fresh read-only native serialization. Save events are intercepted and NEVER forwarded. */
-export async function readNativeProductContent(page,{receipt,identity,timeoutMs=15000}={}){
+export async function readNativeProductContent(page,{receipt,identity,timeoutMs=15000,onFreshProductRead}={}){
  const target=receipt?.target;
  if(receipt?.status!=='content-verified'||!receipt.persisted?.payloads||!Array.isArray(receipt.persisted.images)||typeof identity!=='function'||!Number.isInteger(timeoutMs)||timeoutMs<100||timeoutMs>30000)fail('Verified native receipt and identity required');
+ if(onFreshProductRead!==undefined&&typeof onFreshProductRead!=='function')fail('Invalid fresh product reader');
  let url;try{url=new URL(target.pageUrl);}catch{fail('Invalid native read target');}
  if(url.protocol!=='https:'||url.username||url.password||url.search||url.hash||url.origin!==target.origin||!(/^[1-9]\d{0,9}$/).test(target.productId)||url.pathname!==`/tour/master_product/${target.productId}/change/`)fail('Invalid native read target');
  for(const [key,path] of Object.entries({display:`/tour/master_product/homepage/${target.productId}/`,detail:`/tour/master_product_detail/${target.productId}/change/`,reference:`/tour/master_product_reference/${target.productId}/change/`}))if(target.endpoints?.[key]!==target.origin+path||typeof target.controls?.[key+'Save']!=='string')fail('Invalid native read endpoint');
@@ -28,7 +41,12 @@ export async function readNativeProductContent(page,{receipt,identity,timeoutMs=
  try{
   cdp=await owner.newCDPSession(page);await cdp.send('Network.enable');await cdp.send('Network.setCacheDisabled',{cacheDisabled:true});await cdp.send('Network.setBypassServiceWorker',{bypass:true});
   const response=await page.goto(target.pageUrl,{waitUntil:'domcontentloaded',timeout:timeoutMs});
-  if(!response||response.status()!==200||response.url()!==target.pageUrl||response.fromServiceWorker())fail('Fresh native GET failed');await assertIdentity();
+  if(!response||response.status()!==200||response.url()!==target.pageUrl||response.fromServiceWorker()||response.request().method()!=='GET'||response.request().url()!==target.pageUrl||response.request().redirectedFrom())fail('Fresh native GET failed');await assertIdentity();
+  if(onFreshProductRead){
+   const proof=Object.freeze({}),fresh={page,owner,pageUrl:target.pageUrl,document:await page.evaluateHandle(()=>document),active:true,used:false};freshProductReads.set(proof,fresh);
+   try{await onFreshProductRead(proof);if(!fresh.used)fail('Fresh native product read proof was not consumed');await assertIdentity();}
+   finally{fresh.active=false;freshProductReads.delete(proof);await fresh.document.dispose();}
+  }
   const payloads={};
   for(const [key,tab] of [['display','base'],['detail','detail'],['reference','productreference']]){
    await page.waitForLoadState('load',{timeout:timeoutMs});const link=page.locator(`a[href="#${tab}"]`);if(await link.count()===1)await link.click();await page.locator({base:'#homepage_post',detail:'#include',productreference:'#reference_form'}[tab]).waitFor({state:'visible',timeout:timeoutMs});await assertIdentity();let timer;

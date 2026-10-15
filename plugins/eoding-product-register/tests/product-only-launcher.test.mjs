@@ -75,13 +75,17 @@ test('public launcher routes one real approval through the production browser an
   t.after(() => rm(root, { recursive: true, force: true }));
   const imagePath = path.join(root, 'fixture.png');
   await writeFile(imagePath, png);
-  let fixtureContext, fixtureState, opened = 0, closed = 0;
+  let fixtureContext, fixtureState, opened = 0, closed = 0, finalMasterGets = 0;
   const sessionBrowser = new ExistingProfileBrowser({
     browserDir: path.join(root, 'execution-browser', 'browser-profile'),
     launcher: {
       launchPersistentContext: async (profile, options) => {
         fixtureContext = await chromium.launchPersistentContext(profile, { ...options, headless: true, args: ['--host-resolver-rules=MAP * ~NOTFOUND'] });
         fixtureState = await installProductOnlyFixture(fixtureContext, { product });
+        await fixtureContext.route(fixtureState.pageUrl, async route => {
+          if (route.request().method() === 'GET' && fixtureState.state.seasons.length) finalMasterGets += 1;
+          return route.fallback();
+        });
         await fixtureContext.route('https://basecamp.team/tour/master_product/', route => route.fulfill({ status: 200, contentType: 'text/html', body: '<html><body>Isolated fixture master list</body></html>' }));
         t.after(() => fixtureContext.close());
         return fixtureContext;
@@ -120,6 +124,7 @@ test('public launcher routes one real approval through the production browser an
   const settled = await outcome;
   assert.equal(settled.error, undefined, JSON.stringify({ error: settled.error?.cause?.stack ?? settled.error?.stack, unexpected: fixtureState?.state?.unexpected, writes: fixtureState?.writes }));
   assert.equal(settled.result.status, 'completed');
+  assert.equal(finalMasterGets, 1, 'final native/basic/schedule checks share one independent master GET');
   assert.equal(opened, 1);
   assert.equal(closed, 1);
   assert.deepEqual(launcher.preflight.baseline, { recordsTotal: 0, rows: [] });

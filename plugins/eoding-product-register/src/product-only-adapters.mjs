@@ -47,9 +47,11 @@ export function createProductOnlyAdapters({plan,identity,authorizeWrite,record,l
     await owner.route('**/*',guard);
     return async()=>owner.unroute('**/*',guard);
    });
-   const content=await readNativeProductContent(page,{receipt:mediaReceipt,identity:assertIdentity,timeoutMs});
+   // Reuse only this fresh post-save document; the opaque proof expires before
+   // native serialization continues and never replaces an earlier stage read.
+   let basicSchedule;
+   const content=await readNativeProductContent(page,{receipt:mediaReceipt,identity:assertIdentity,timeoutMs,onFreshProductRead:async freshProductRead=>{basicSchedule=await stages.readFinal(page,p,c,{freshProductRead});}});
    finalTransport?.verify();
-   const basicSchedule=await stages.readFinal(page,p,c);
    let seasonProof;
    if(seasonExcluded){
     const target={productId:String(c.targets.productId)},owner=page.context(),guard=r=>['GET','HEAD'].includes(r.request().method())?r.fallback():r.abort();

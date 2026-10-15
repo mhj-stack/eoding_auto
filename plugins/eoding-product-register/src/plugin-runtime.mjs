@@ -16,7 +16,7 @@ import { chromium } from 'playwright';
 import { flightPreflight, sourceQuality, workflowTiming, changeWait } from './plugin-workflow.mjs';
 import { scopeFor } from './product-only-review.mjs';
 import { resumeCheckpoint } from './plugin-resume.mjs';
-import { erpLookup } from './erp-lookup.mjs';
+import { erpLookup, LOOKUP_KINDS } from './erp-lookup.mjs';
 
 const copy = value => structuredClone(value);
 const fail = message => { throw new Error(message); };
@@ -316,6 +316,35 @@ export class ProductImportPlugin {
     });
   }
 
+  /** Batch read-only selectors in one owned session, with identity checked at both ends. */
+  async lookups({ requests } = {}) {
+    if (!Array.isArray(requests) || requests.length < 1 || requests.length > 20) fail('일괄 조회는 1~20개 항목을 받습니다.');
+    const keys = new Set();
+    for (const item of requests) {
+      if (!item || typeof item !== 'object' || Array.isArray(item) || Object.keys(item).some(key => !['key', 'kind', 'query', 'productId'].includes(key))) fail('일괄 조회 항목 형식이 올바르지 않습니다.');
+      if (typeof item.key !== 'string' || !item.key.trim() || item.key !== item.key.trim() || item.key.length > 50 || keys.has(item.key)) fail('일괄 조회 key는 중복 없는 1~50자 문자열이어야 합니다.');
+      keys.add(item.key);
+      if (!LOOKUP_KINDS.includes(item.kind)) fail('지원하지 않는 조회 종류입니다.');
+      if (item.kind !== 'departport' && (typeof item.query !== 'string' || !item.query.trim() || item.query.length > 50)) fail('검색어는 1~50자로 입력하세요.');
+      if (item.productId !== undefined && (typeof item.productId !== 'string' || !/^[1-9][0-9]{0,12}$/.test(item.productId))) fail('기존 상품 ID(productId) 형식이 올바르지 않습니다.');
+    }
+    return this.exclusive(async () => {
+      if (this.active) fail('등록 검토·실행 중에는 조회할 수 없습니다.');
+      const page = await this.browser.ensurePage(), observed = await this.identityReader(page);
+      const results = [], errors = [];
+      for (let offset = 0; offset < requests.length; offset += 4) {
+        const batch = requests.slice(offset, offset + 4);
+        const settled = await Promise.allSettled(batch.map(({ key, ...request }) => erpLookup(page, request)));
+        for (const [index, outcome] of settled.entries()) {
+          if (outcome.status === 'fulfilled') results.push({ key: batch[index].key, ...outcome.value });
+          else errors.push({ key: batch[index].key, kind: batch[index].kind, message: String(outcome.reason?.message ?? outcome.reason) });
+        }
+      }
+      if (!same(await this.identityReader(page), observed)) fail('일괄 조회 중 회사·계정·로그인 세션이 변경됐습니다. 결과를 사용하지 마세요.');
+      return { companyId: observed.companyId, accountName: observed.identity.accountName, complete: errors.length === 0, results, errors, notice: '각 key의 정확한 label/value를 사용하세요. 오류 항목만 수정해 재조회하고, 조회 결과로 저장 완료를 판단하지 마세요.' };
+    });
+  }
+
   async review({ id } = {}) {
     return this.exclusive(async () => {
       if (this.active) fail('다른 등록 검토가 열려 있습니다.');
@@ -443,7 +472,8 @@ export class ProductImportPlugin {
     });
   }
 
-  async get({ id, includeSource = false } = {}) {
+  async get({ id, includeSource = false, compact = false } = {}) {
+    if (typeof compact !== 'boolean' || (compact && includeSource)) fail('compact와 includeSource는 함께 사용할 수 없습니다.');
     const job = await this.load(id);
     const intent=await readFile(path.join(this.directory(id),'delegated-approval.json'),'utf8').then(JSON.parse).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
     const approvalDelegation=intent?{actor:intent.actor,requestedAt:intent.at,planDigest:intent.planDigest,scopeDigest:intent.scopeDigest,scope:copy(intent.scope),notice:'사용자 위임 요청 기록이며 실제 제출·승인·실행·완료 여부는 작업 상태와 독립 확인 결과를 따릅니다.'}:null;
@@ -454,7 +484,9 @@ export class ProductImportPlugin {
       if (this.active.launcher.writes.some(event => event.kind === 'approval-claim')) status = 'running';
       if (this.active.persistenceError) status = 'needs-reconciliation';
     } else if (['opening-review', 'awaiting-approval'].includes(status)) status = 'interrupted-needs-reconciliation';
-    return { id, status, resumeFrom: job.resumeFrom ?? null, timing: workflowTiming(job), sourceQuality: { ...sourceQuality(job.source), supplementCount: job.source.supplements?.length ?? 0 }, approvalDelegation, progress: this.active?.id === id ? executionProgress(this.active.launcher.writes) : job.failure?.progress ?? null, seasonMode: job.seasonMode, sourceDescriptor: job.sourceDescriptor, sourceDigest: job.sourceDigest, images: copy(job.images), validation: job.validation ?? null, result: job.result ?? null, failure: job.failure ?? null, ...(includeSource ? { source: copy(job.source), draft: copy(job.draft) } : {}) };
+    const state = { id, status, resumeFrom: job.resumeFrom ?? null, timing: workflowTiming(job), approvalDelegation, progress: this.active?.id === id ? executionProgress(this.active.launcher.writes) : job.failure?.progress ?? null, validation: job.validation ?? null, result: job.result ?? null, failure: job.failure ?? null };
+    if (compact) return { ...state, imageCount: job.images.length };
+    return { ...state, sourceQuality: { ...sourceQuality(job.source), supplementCount: job.source.supplements?.length ?? 0 }, seasonMode: job.seasonMode, sourceDescriptor: job.sourceDescriptor, sourceDigest: job.sourceDigest, images: copy(job.images), ...(includeSource ? { source: copy(job.source), draft: copy(job.draft) } : {}) };
   }
 
   async close() {
