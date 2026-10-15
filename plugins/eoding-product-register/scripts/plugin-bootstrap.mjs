@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile, readdir, lstat, copyFile, open, unlink, rm, rename } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, readdir, lstat, copyFile, open, unlink, rm, rename, realpath, symlink } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 
 export const pluginRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -36,9 +36,28 @@ export async function runtimeFiles(root) {
 }
 
 export async function runtimeKey(root, files) {
-  const hash = createHash('sha256').update(`${process.platform}/${process.arch}/node-${process.versions.node.split('.')[0]}\0`);
+  const hash = createHash('sha256').update(`${process.platform}/${process.arch}/node-${process.versions.node.split('.')[0]}/abi-${process.versions.modules}\0`);
   for (const name of files) hash.update(name).update('\0').update(await readFile(path.join(root, name))).update('\0');
   return hash.digest('hex');
+}
+
+// Increment when installation behavior changes in a way that requires rebuilt dependencies.
+export const DEPENDENCY_INSTALLER_SCHEMA = 1;
+const dependencyCompatibility = () => ({ platform: process.platform, arch: process.arch, nodeMajor: process.versions.node.split('.')[0], nodeAbi: process.versions.modules, installerSchema: DEPENDENCY_INSTALLER_SCHEMA });
+const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+function packageMetadata(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('A package manifest/lock object is required.');
+  const result = { ...value };
+  delete result.name; delete result.version;
+  return result;
+}
+
+/** All installation inputs remain bound; only root package name/version release metadata is ignored. */
+export async function dependencyKey(root, compatibility = dependencyCompatibility()) {
+  const manifest = packageMetadata(JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8')));
+  const lock = packageMetadata(JSON.parse(await readFile(path.join(root, 'package-lock.json'), 'utf8')));
+  if (lock.packages && Object.hasOwn(lock.packages, '')) lock.packages = { ...lock.packages, '': packageMetadata(lock.packages['']) };
+  return createHash('sha256').update(JSON.stringify(canonical({ compatibility, manifest, lock }))).update('\0').update(await readFile(path.join(root, 'requirements.txt'))).digest('hex');
 }
 
 export function run(command, args, { cwd, env = process.env, quiet = false, timeout = 600000 } = {}) {
@@ -95,9 +114,42 @@ export async function installRuntime(root) {
 
 export const pythonExecutable = root => path.join(root, 'python', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
 
-async function ready(root, key) {
-  try { return JSON.parse(await readFile(path.join(root, 'READY.json'), 'utf8')).key === key; }
-  catch { return false; }
+const normalizedPath = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+async function plainDirectory(dir, { create = false } = {}) {
+  if (create) await mkdir(dir, { recursive: true });
+  const info = await lstat(dir);
+  if (!info.isDirectory() || info.isSymbolicLink() || normalizedPath(await realpath(dir)) !== normalizedPath(dir)) throw new Error(`Plugin cache directory cannot be a symlink or external path: ${dir}`);
+}
+
+async function receipt(root, kind, key) {
+  try { await lstat(root); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  await plainDirectory(root);
+  const file = path.join(root, 'READY.json');
+  let info;
+  try { info = await lstat(file); } catch (error) { if (error.code === 'ENOENT') throw new Error(`Incomplete plugin cache; no ready receipt: ${root}`); throw error; }
+  if (!info.isFile() || info.isSymbolicLink()) throw new Error('Plugin cache receipt must be a regular file.');
+  const value = JSON.parse(await readFile(file, 'utf8'));
+  if (value.kind !== kind || value.key !== key) throw new Error(`Plugin cache receipt does not match its computed key: ${root}`);
+  return value;
+}
+
+async function dependencyReady(root, key) {
+  if (!await receipt(root, 'eoding-dependencies-v1', key)) return false;
+  for (const name of ['node_modules', 'python']) await plainDirectory(path.join(root, name));
+  return true;
+}
+
+async function runtimeReady(root, key, dependencies, depKey) {
+  const value = await receipt(root, 'eoding-runtime-v2', key);
+  if (!value) return false;
+  if (value.dependencyKey !== depKey || !await dependencyReady(dependencies, depKey)) throw new Error('Plugin runtime dependencies do not match the computed installation inputs.');
+  for (const name of ['node_modules', 'python']) {
+    const link = path.join(root, name), expected = path.join(dependencies, name);
+    if (!(await lstat(link)).isSymbolicLink() || normalizedPath(await realpath(link)) !== normalizedPath(expected)) throw new Error(`Plugin runtime dependency link does not match its private cache: ${name}`);
+  }
+  // Packaged and cached application files have the same no-symlink allowlist.
+  await runtimeFiles(root);
+  return true;
 }
 
 async function acquireLock(file, timeout = 600000) {
@@ -109,6 +161,9 @@ async function acquireLock(file, timeout = 600000) {
       return async () => { await handle.close(); await unlink(file); };
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
+      const info = await lstat(file).catch(cause => { if (cause.code === 'ENOENT') return null; throw cause; });
+      if (!info) continue;
+      if (!info.isFile() || info.isSymbolicLink()) throw new Error('Plugin setup lock must be a regular file.');
       let owner;
       try { owner = JSON.parse(await readFile(file, 'utf8')); } catch { /* Owner may still be writing the lock. */ }
       if (Number.isInteger(owner?.pid) && owner.pid > 0) {
@@ -127,27 +182,50 @@ export async function prepareRuntime({ root = pluginRoot, dataDir = privateDataD
   if (Number(process.versions.node.split('.')[0]) < 22) throw new Error('Node.js 22 or newer is required.');
   const files = await runtimeFiles(root);
   const key = await runtimeKey(root, files);
-  const cache = path.resolve(dataDir, 'runtimes');
+  const depKey = await dependencyKey(root);
+  // Establish the explicitly selected private root once; child caches cannot redirect elsewhere.
+  const selected = privateDataDir(dataDir);
+  await mkdir(selected, { recursive: true });
+  const selectedInfo = await lstat(selected);
+  if (!selectedInfo.isDirectory() || selectedInfo.isSymbolicLink()) throw new Error('The private plugin data root cannot be a symlink.');
+  const privateRoot = await realpath(selected);
+  const cache = path.join(privateRoot, 'runtimes'), dependencyCache = path.join(privateRoot, 'dependencies');
+  await plainDirectory(cache, { create: true });
+  await plainDirectory(dependencyCache, { create: true });
   const target = path.join(cache, key);
-  if (await ready(target, key)) return target;
-  await mkdir(cache, { recursive: true });
+  const dependencies = path.join(dependencyCache, depKey);
+  if (await runtimeReady(target, key, dependencies, depKey)) return target;
   const release = await acquireLock(path.join(cache, 'setup.lock'));
   const temporary = path.join(cache, `.setup-${randomUUID()}`);
+  const dependencyTemporary = path.join(dependencyCache, `.setup-${randomUUID()}`);
   try {
-    if (await ready(target, key)) return target;
+    if (await runtimeReady(target, key, dependencies, depKey)) return target;
+    if (!await dependencyReady(dependencies, depKey)) {
+      await mkdir(dependencyTemporary);
+      for (const name of ['package.json', 'package-lock.json', 'requirements.txt']) await copyFile(path.join(root, name), path.join(dependencyTemporary, name));
+      if (await dependencyKey(dependencyTemporary) !== depKey) throw new Error('Plugin dependency inputs changed during setup. Reconnect to use one consistent version.');
+      await install(dependencyTemporary);
+      for (const name of ['node_modules', 'python']) await plainDirectory(path.join(dependencyTemporary, name));
+      await writeFile(path.join(dependencyTemporary, 'READY.json'), JSON.stringify({ kind: 'eoding-dependencies-v1', key: depKey, installedAt: new Date().toISOString() }));
+      await rename(dependencyTemporary, dependencies);
+    }
     await mkdir(temporary);
+    for (const name of ['src', 'scripts', 'skills/eoding-product-register', 'examples']) await mkdir(path.join(temporary, name), { recursive: true });
     for (const name of files) {
       const dest = path.join(temporary, name);
       await mkdir(path.dirname(dest), { recursive: true });
       await copyFile(path.join(root, name), dest);
     }
-    await install(temporary);
-    await writeFile(path.join(temporary, 'READY.json'), JSON.stringify({ key, installedAt: new Date().toISOString() }));
+    if (await runtimeKey(temporary, files) !== key || await dependencyKey(temporary) !== depKey) throw new Error('Plugin source changed during setup. Reconnect to use one consistent version.');
+    for (const name of ['node_modules', 'python']) await symlink(path.join(dependencies, name), path.join(temporary, name), process.platform === 'win32' ? 'junction' : 'dir');
+    await writeFile(path.join(temporary, 'READY.json'), JSON.stringify({ kind: 'eoding-runtime-v2', key, dependencyKey: depKey, installedAt: new Date().toISOString() }));
     await rename(temporary, target);
     return target;
   } finally {
-    if (path.dirname(path.resolve(temporary)) !== cache || !path.basename(temporary).startsWith('.setup-')) throw new Error('Invalid setup cleanup target');
-    try { await rm(temporary, { recursive: true, force: true, maxRetries: 3 }); }
+    for (const [directory, parent] of [[temporary, cache], [dependencyTemporary, dependencyCache]]) {
+      if (path.dirname(path.resolve(directory)) !== parent || !path.basename(directory).startsWith('.setup-')) throw new Error('Invalid setup cleanup target');
+    }
+    try { await rm(temporary, { recursive: true, force: true, maxRetries: 3 }); await rm(dependencyTemporary, { recursive: true, force: true, maxRetries: 3 }); }
     finally { await release(); }
   }
 }
