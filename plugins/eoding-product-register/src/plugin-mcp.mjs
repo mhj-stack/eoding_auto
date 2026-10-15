@@ -13,7 +13,7 @@ const dataDir = process.env.EODING_DATA_DIR || process.env.PLUGIN_DATA || path.j
 const python = path.join(dataDir, 'python', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
 if (!process.env.EODING_PYTHON && existsSync(python)) process.env.EODING_PYTHON = python;
 const runtime = new ProductImportPlugin({ dataDir, inputDir: process.env.EODING_INPUT_DIR });
-const server = new McpServer({ name: 'eoding-product-register', version: '0.4.0' });
+const server = new McpServer({ name: 'eoding-product-register', version: '0.4.1' });
 const id = z.string().uuid();
 const object = z.record(z.unknown());
 const readonly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
@@ -25,16 +25,16 @@ const safe = fn => async args => {
 };
 const register = (name, description, inputSchema, annotations, handler) => server.registerTool(name, { description, inputSchema, annotations }, safe(handler));
 register('product_import_capabilities', 'Read plugin scope, installation paths and the source → prepare → authorized review → result workflow.', {}, readonly, async () => ({
-  version: '0.4.0', transport: 'stdio', requiresLlmApiKey: false,
+  version: '0.4.1', transport: 'stdio', requiresLlmApiKey: false,
   scope: ['new-private-basic', 'display-images', 'detail-reference-content', 'schedule', 'all-days-meals', 'optional-season-prices-flight', 'optional-single-departure', 'fit-private-product-options-sales-contents', 'erp-contents-place-meal-shopping-optionaltour-meeting'],
   excluded: ['existing-product-overwrite', 'multiple-events', 'hotel-assignment', 'publish', 'sales-channel'],
   requiresUserAuthorization: true, approvalModes: ['human-form', 'explicit-user-delegation'], liveEndToEndVerified: false,
   setupTargetMs: SETUP_TARGET_MS, timingIncludes: ['source-collection', 'AI-coordination', 'user-waits', 'ERP-writes', 'independent-readback'], timingIsGuarantee: false,
-  optimizations: ['flight-duration-preflight', 'bounded-image-batch', 'source-supplement', 'explicit-wait-accounting', 'retained-login-session', 'batched-erp-lookups', 'compact-progress', 'dependency-cache-reuse', 'single-final-product-read'],
+  optimizations: ['flight-duration-preflight', 'bounded-image-batch', 'source-supplement', 'explicit-wait-accounting', 'retained-login-session', 'batched-erp-lookups', 'compact-progress', 'dependency-cache-reuse', 'single-final-product-read', 'bounded-content-review', 'background-content-progress', 'all-skills-runtime-cache'],
   inputDir: runtime.inputDir,
   workflow: ['product_import_schema (once per connected version)', 'product_import_context', 'product_import_source', 'product_import_images', 'product_import_lookups', 'product_import_prepare', 'product_import_review', 'product_import_approve (only when explicitly delegated)', 'product_import_get (compact:true)'],
   fitWorkflow: ['product_fit_schema', 'product_import_source', 'product_import_images', 'product_import_lookups', 'product_fit_prepare', 'product_fit_review', 'product_fit_register (user instruction required)', 'product_import_get (compact:true).fit'],
-  contentWorkflow: ['product_content_schema', 'product_import_source', 'product_import_images (only photos present in the source)', 'product_import_lookups', 'product_content_prepare', 'product_content_review', 'product_content_register (user instruction required)'],
+  contentWorkflow: ['product_content_schema', 'product_import_source', 'product_import_images (only photos present in the source)', 'product_import_lookups', 'product_content_prepare', 'product_content_review', 'product_content_register (user instruction required)', 'product_import_get (compact:true).contents'],
   authorization: { required: true, reuseExplicitUserDelegation: true, separateUserConfirmationWhenDelegated: false },
   notice: 'The connected AI interprets sources and prepares the full scope. If the user already delegated approval submission, review internally and immediately call product_import_approve with that direct human instruction; do not ask again. Never ask users for JSON or approve every day. Installation is not live ERP acceptance.'
 }));
@@ -105,7 +105,7 @@ register('product_content_prepare', 'Validate and persist 1-50 ERP contents on a
 register('product_content_review', 'Read-only content review: resolve exact cities and find existing same-type/city/name contents to reuse in the logged-in dedicated browser. Returns a Korean summary and planDigest. Never saves ERP.', {
   id
 }, { ...local, openWorldHint: true }, args => runtime.contentReview(args));
-register('product_content_register', 'Create only the missing reviewed contents (reusing exact existing ones) with their source photos, each confirmed by an independent search. Requires the review binding and a direct user instruction that asked for or delegated registration. Re-running continues from the journal without duplicates.', {
+register('product_content_register', 'Start missing reviewed contents in the background, reusing exact existing records and source photos. Requires the review binding and a direct user instruction. Poll product_import_get({id,compact:true}).contents for progress and completed results. A continuation first reconciles the journal: an attempted record that is absent or changed blocks automatic recreation.', {
   id, companyId: z.string().min(1), accountName: z.string().min(1), planDigest: z.string().regex(/^[a-f0-9]{64}$/),
   delegation: z.object({ explicitUserRequest: z.literal(true), userInstruction: z.string().min(1).max(2000) }).strict()
 }, { ...local, destructiveHint: true, openWorldHint: true }, args => runtime.contentRegister(args));

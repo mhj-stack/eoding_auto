@@ -30,7 +30,7 @@ export async function runtimeFiles(root) {
       else if (entry.isFile()) files.push(name);
     }
   }
-  for (const relative of ['src', 'scripts', 'skills/eoding-product-register', 'examples']) await walk(relative);
+  for (const relative of ['src', 'scripts', 'skills', 'examples']) await walk(relative);
   for (const name of files) if (!(await lstat(path.join(root, name))).isFile()) throw new Error(`Invalid plugin file: ${name}`);
   return files.sort();
 }
@@ -210,7 +210,7 @@ export async function prepareRuntime({ root = pluginRoot, dataDir = privateDataD
       await rename(dependencyTemporary, dependencies);
     }
     await mkdir(temporary);
-    for (const name of ['src', 'scripts', 'skills/eoding-product-register', 'examples']) await mkdir(path.join(temporary, name), { recursive: true });
+    for (const name of ['src', 'scripts', 'skills', 'examples']) await mkdir(path.join(temporary, name), { recursive: true });
     for (const name of files) {
       const dest = path.join(temporary, name);
       await mkdir(path.dirname(dest), { recursive: true });

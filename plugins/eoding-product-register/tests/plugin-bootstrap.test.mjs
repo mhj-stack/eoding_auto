@@ -70,6 +70,25 @@ test('concurrent setup installs once; code, skill and release metadata updates r
   t.diagnostic('Installer calls for initial setup + source update: previous=2, split cache=1. Subsequent SKILL/release metadata updates add zero installs.');
 });
 
+test('every packaged skill is copied and invalidates the application cache without reinstalling dependencies', async t => {
+  const f = await fixture(t);
+  const extra = path.join(f.root, 'skills/eoding-content-register');
+  await mkdir(path.join(extra, 'references'), { recursive: true });
+  await writeFile(path.join(extra, 'SKILL.md'), 'Content instructions.');
+  await writeFile(path.join(extra, 'references/contract.md'), 'Content contract.');
+  let installs = 0;
+  const install = async target => { installs++; await installFixture(target); };
+  const first = await prepareRuntime({ ...f, install });
+  assert.equal(await readFile(path.join(first, 'skills/eoding-content-register/SKILL.md'), 'utf8'), 'Content instructions.');
+  assert.equal(await readFile(path.join(first, 'skills/eoding-content-register/references/contract.md'), 'utf8'), 'Content contract.');
+  await writeFile(path.join(extra, 'SKILL.md'), 'Updated content instructions.');
+  const second = await prepareRuntime({ ...f, install });
+  assert.notEqual(first, second);
+  assert.equal(installs, 1);
+  await symlink(extra, path.join(f.root, 'skills/linked'), process.platform === 'win32' ? 'junction' : 'dir');
+  await assert.rejects(runtimeFiles(f.root), /symlink/);
+});
+
 test('failed setup leaves no ready runtime, releases its lock, and permits a clean retry', async t => {
   const f = await fixture(t);
   await assert.rejects(prepareRuntime({ ...f, install: async () => { throw new Error('fixture install failed'); } }), /fixture install failed/);
