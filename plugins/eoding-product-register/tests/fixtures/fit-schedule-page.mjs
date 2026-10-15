@@ -1,0 +1,18 @@
+export function fitSchedulePage({ delay = 15, typeDelay = delay, ignoreAdd = false, initialSteps = 0 } = {}) {
+  return `<!doctype html><html><meta charset="utf-8"><body>
+  <button id="add_schedule_day">Add day</button><ul id="schedule-tree"></ul>
+  <section id="schedule"><div class="sche_detail"><button class="add_schedule_detail">Add step</button></div><ul id="schedule_step_area"></ul></section>
+  <button id="save">Save</button><div id="dialogs"></div>
+  <script>
+  const config=${JSON.stringify({ delay, typeDelay, ignoreAdd, initialSteps })};let selected=0,uid=0;
+  function jquery(element){return{val(value){element.value=value;return this},trigger(name){element.dispatchEvent(new Event(name,{bubbles:true}));return this}}}jquery.active=0;window.jQuery=jquery;
+  const later=(fn,delay=config.delay)=>{jquery.active++;setTimeout(()=>{try{fn()}finally{jquery.active--}},delay)};
+  const modal=fn=>{const box=document.createElement('div');box.className='modal open';box.innerHTML='<button>확인</button>';box.querySelector('button').onclick=()=>{box.remove();fn()};dialogs.append(box)};
+  const fields=(li,type)=>{li.querySelector('.fields')?.remove();const box=document.createElement('div');box.className='fields';box.innerHTML=type==='7'?'<input class="custom_title"><input class="custom_short"><textarea class="description"></textarea>':'<input class="custom_title"><div class="tmpl"><div class="contents_memo"><textarea class="description"></textarea></div></div>';li.append(box)};
+  const addStep=()=>{const li=document.createElement('li');li.id='step-'+(++uid);li.innerHTML='<select class="schedule_type_select"><option value="7">custom</option><option value="4">place</option></select><button class="delete_schedule_detail">delete</button>';fields(li,'7');li.querySelector('select').onchange=event=>later(()=>fields(li,event.target.value),config.typeDelay);li.querySelector('button').onclick=()=>modal(()=>later(()=>li.remove()));schedule_step_area.append(li)};
+  document.querySelector('.add_schedule_detail').onclick=()=>{if(!config.ignoreAdd)later(addStep)};
+  add_schedule_day.onclick=()=>later(()=>{const li=document.createElement('li'),number=document.querySelectorAll('#schedule-tree a').length+1;li.innerHTML='<a class="jstree-anchor">'+number+'일차</a>';li.querySelector('a').onclick=event=>{for(const node of document.querySelectorAll('#schedule-tree li'))node.setAttribute('aria-selected','false');for(const node of document.querySelectorAll('#schedule-tree a'))node.classList.remove('jstree-clicked');li.setAttribute('aria-selected','true');event.target.classList.add('jstree-clicked');later(()=>{selected=number;schedule_step_area.replaceChildren();for(let i=0;i<config.initialSteps;i++)addStep()})};document.querySelector('#schedule-tree').append(li)});
+  window.controller={schedule_controller:{open_contents_popup_id:null,import_contents(items){const li=document.getElementById(this.open_contents_popup_id);for(const item of items){const content=document.createElement('div');content.className='imported_contents';content.dataset.id=item.id;li.append(content)}}}};
+  save.onclick=async()=>{jquery.active++;try{const steps=[...schedule_step_area.children].map((li,index)=>({day:selected,step:index+1,type:li.querySelector('select').value,title:li.querySelector('.custom_title').value,short:li.querySelector('.custom_short')?.value??'',description:li.querySelector('.description').value,contents:[...li.querySelectorAll('.imported_contents')].map(node=>node.dataset.id)}));const r=await fetch('/fit/schedule/812345/change/',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(steps)});await r.text();modal(()=>{})}finally{jquery.active--}};
+  </script></body></html>`;
+}

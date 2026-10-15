@@ -13,7 +13,7 @@ const dataDir = process.env.EODING_DATA_DIR || process.env.PLUGIN_DATA || path.j
 const python = path.join(dataDir, 'python', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
 if (!process.env.EODING_PYTHON && existsSync(python)) process.env.EODING_PYTHON = python;
 const runtime = new ProductImportPlugin({ dataDir, inputDir: process.env.EODING_INPUT_DIR });
-const server = new McpServer({ name: 'eoding-product-register', version: '0.4.1' });
+const server = new McpServer({ name: 'eoding-product-register', version: '0.4.2' });
 const id = z.string().uuid();
 const object = z.record(z.unknown());
 const readonly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
@@ -25,12 +25,12 @@ const safe = fn => async args => {
 };
 const register = (name, description, inputSchema, annotations, handler) => server.registerTool(name, { description, inputSchema, annotations }, safe(handler));
 register('product_import_capabilities', 'Read plugin scope, installation paths and the source → prepare → authorized review → result workflow.', {}, readonly, async () => ({
-  version: '0.4.1', transport: 'stdio', requiresLlmApiKey: false,
+  version: '0.4.2', transport: 'stdio', requiresLlmApiKey: false,
   scope: ['new-private-basic', 'display-images', 'detail-reference-content', 'schedule', 'all-days-meals', 'optional-season-prices-flight', 'optional-single-departure', 'fit-private-product-options-sales-contents', 'erp-contents-place-meal-shopping-optionaltour-meeting'],
   excluded: ['existing-product-overwrite', 'multiple-events', 'hotel-assignment', 'publish', 'sales-channel'],
   requiresUserAuthorization: true, approvalModes: ['human-form', 'explicit-user-delegation'], liveEndToEndVerified: false,
   setupTargetMs: SETUP_TARGET_MS, timingIncludes: ['source-collection', 'AI-coordination', 'user-waits', 'ERP-writes', 'independent-readback'], timingIsGuarantee: false,
-  optimizations: ['flight-duration-preflight', 'bounded-image-batch', 'source-supplement', 'explicit-wait-accounting', 'retained-login-session', 'batched-erp-lookups', 'compact-progress', 'dependency-cache-reuse', 'single-final-product-read', 'bounded-content-review', 'background-content-progress', 'all-skills-runtime-cache'],
+  optimizations: ['flight-duration-preflight', 'bounded-image-batch', 'source-supplement', 'explicit-wait-accounting', 'retained-login-session', 'batched-erp-lookups', 'compact-progress', 'dependency-cache-reuse', 'single-final-product-read', 'bounded-content-review', 'background-content-progress', 'all-skills-runtime-cache', 'condition-based-fit-schedule', 'atomic-package-day-snapshot'],
   inputDir: runtime.inputDir,
   workflow: ['product_import_schema (once per connected version)', 'product_import_context', 'product_import_source', 'product_import_images', 'product_import_lookups', 'product_import_prepare', 'product_import_review', 'product_import_approve (only when explicitly delegated)', 'product_import_get (compact:true)'],
   fitWorkflow: ['product_fit_schema', 'product_import_source', 'product_import_images', 'product_import_lookups', 'product_fit_prepare', 'product_fit_review', 'product_fit_register (user instruction required)', 'product_import_get (compact:true).fit'],

@@ -2,6 +2,7 @@
 // Every stage is find-or-create followed by an independent readback, so a re-run after an
 // interruption continues from the journal instead of creating a second product, option or sale.
 import { readFile } from 'node:fs/promises';
+import { writeFitScheduleDay } from './fit-schedule.mjs';
 import { createHash } from 'node:crypto';
 import { FIT_CATEGORIES, FIT_MASTER_STATUS, FIT_SALE_STATUS, cityName, planImageIds, referencePayload, cancelRefundHtml, placeFields, saleDates } from './fit-plan.mjs';
 
@@ -127,7 +128,8 @@ async function openMaster(page, masterId, tab) {
     await page.evaluate(id => document.querySelector(`a[href="#${id}"]`).click(), tab);
     const ready = { option: '#add_room', schedule: '#schedule-tree' }[tab];
     if (ready) await page.waitForSelector(ready, { state: 'attached', timeout: 20000 });
-    await sleep(800);
+    if (tab === 'schedule') await page.waitForFunction(() => Boolean(globalThis.controller?.schedule_controller && !globalThis.jQuery.active), undefined, { timeout: 20000 });
+    else await sleep(800);
   }
 }
 
@@ -252,41 +254,6 @@ async function readSchedule(page, masterId) {
   }, masterId);
 }
 
-async function writeScheduleDay(page, masterId, day, placeIds) {
-  await page.evaluate(async ({ dayNumber }) => {
-    const anchors = () => [...document.querySelectorAll('#schedule-tree .jstree-anchor')].filter(a => /^\d+일차$/.test(a.textContent.trim()));
-    for (let i = 0; i < 10 && anchors().length < dayNumber; i++) { document.querySelector('#add_schedule_day').click(); await new Promise(resolve => setTimeout(resolve, 1500)); for (const b of document.querySelectorAll('.modal.open button')) if (b.textContent.trim() === '확인') b.click(); }
-    const anchor = anchors()[dayNumber - 1];
-    if (!anchor) throw new Error(`${dayNumber}일차를 만들지 못했습니다.`);
-    anchor.click(); await new Promise(resolve => setTimeout(resolve, 1500));
-  }, { dayNumber: day.day });
-  await page.evaluate(async ({ steps, placeIds }) => {
-    const $ = globalThis.jQuery, controller = globalThis.controller.schedule_controller, wait = ms => new Promise(resolve => setTimeout(resolve, ms));
-    const items = () => [...document.querySelectorAll('#schedule_step_area > li')];
-    const confirm = () => { for (const b of document.querySelectorAll('.modal.open button')) if (b.textContent.trim() === '확인') b.click(); };
-    for (let i = 0; i < 40 && items().length < steps.length; i++) { document.querySelector('#schedule .sche_detail .add_schedule_detail').click(); await wait(800); confirm(); }
-    for (let i = 0; i < 40 && items().length > steps.length; i++) { items().at(-1).querySelector('.delete_schedule_detail').click(); await wait(800); confirm(); await wait(400); }
-    if (items().length !== steps.length) throw new Error('일정 단계 수를 맞추지 못했습니다.');
-    for (const [index, step] of steps.entries()) {
-      let li = items()[index];
-      const type = step.kind === 'place' ? '4' : '7', select = li.querySelector('select.schedule_type_select') ?? li.querySelector('select');
-      if (select.value !== type) { $(select).val(type).trigger('change'); await wait(1200); li = items()[index]; }
-      const set = (selector, value) => { const el = li.querySelector(selector); if (!el) throw new Error(`일정 입력칸이 없습니다: ${selector}`); el.value = value; el.dispatchEvent(new Event('input', { bubbles: true })); $(el).trigger('change'); };
-      set('.custom_title', step.title);
-      if (step.kind === 'custom') { set('.custom_short', step.short); set('.description', step.description); continue; }
-      const memo = li.querySelector('.tmpl > .contents_memo .description') ?? li.querySelector('.description');
-      memo.value = step.description; memo.dispatchEvent(new Event('input', { bubbles: true }));
-      li.querySelectorAll('.imported_contents').forEach(el => el.remove());
-      controller.open_contents_popup_id = li.id;
-      controller.import_contents(step.places.map(key => placeIds[key]));
-    }
-  }, { steps: day.steps, placeIds });
-  const response = page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === `/fit/schedule/${masterId}/change/`, { timeout: 30000 });
-  await page.evaluate(() => document.querySelector('#save').click());
-  const status = (await response).status();
-  await sleep(1000); await dismissAlerts(page);
-  if (status !== 200) fail(`${day.day}일차 일정 저장 응답이 ${status}입니다.`);
-}
 
 /**
  * Runs the approved FIT plan. `journal.rows` are earlier events of this job; `journal.append`
@@ -404,7 +371,7 @@ export async function runFit({ page, plan, resolved, images, journal, assertIden
   // 7. Schedule: native editor per day (custom text or linked place contents), then readback.
   await stage('schedule', async () => {
     await openMaster(page, masterId, 'schedule');
-    for (const day of plan.schedule) { await writeScheduleDay(page, masterId, day, placeIds); if (day !== plan.schedule.at(-1)) await openMaster(page, masterId, 'schedule'); }
+    for (const day of plan.schedule) { progress(`schedule:day:${day.day}`); await writeFitScheduleDay(page, masterId, day, placeIds, { assertIdentity }); if (day !== plan.schedule.at(-1)) await openMaster(page, masterId, 'schedule'); }
     const saved = await readSchedule(page, masterId);
     const expected = plan.schedule.flatMap(day => day.steps.map((step, i) => ({ day: day.day, step: i + 1, type: step.kind === 'place' ? '4' : '7', title: step.title, contents: (step.places ?? []).map(key => String(placeIds[key].id)) })));
     if (JSON.stringify(saved.map(({ day, step, type, title, contents }) => ({ day, step, type, title, contents }))) !== JSON.stringify(expected)) fail('일정 재조회가 승인 계획과 다릅니다.');
