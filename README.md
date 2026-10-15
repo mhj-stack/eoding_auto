@@ -1,4 +1,6 @@
-# 어딩 상품등록기 0.4.2
+# 어딩 상품등록기 0.4.3
+
+0.4.3: 저작권자를 주식회사 어딩 (Eoding Inc.)으로 명시하고 오픈소스 고지(`THIRD_PARTY_NOTICES.md`)를 추가했습니다. 기능 변경은 없습니다.
 
 0.4.2: 일정표 입력 속도를 개선했습니다. FIT 일정의 일차·단계·유형 전환에 쓰던 고정 대기를 화면 준비 조건으로 바꾸고 일차별 진행을 표시합니다. 패키지 일차 상태는 같은 입력칸을 한 번의 DOM 스냅샷으로 확인해 브라우저 왕복 호출을 줄입니다. 기존 저장·독립 재조회·계정 검증은 유지합니다.
 
@@ -86,4 +88,4 @@ codex plugin add eoding-product-register@eoding-auto
 
 자동 테스트는 격리된 가상 ERP 화면에서 검증합니다. 실제 ERP의 비공개 테스트 한 건은 중단 복구를 거쳐 이미지·상세·4일 일정·시즌/요금의 저장과 전체 독립 재조회를 완료했습니다. 최신 버전의 신규 등록을 처음부터 끝까지 중단 없이 실행하는 운영 검증은 별도입니다. 특정 AI 앱의 모든 버전이나 모든 ERP 화면 변형을 보장하지 않습니다. [검증 범위](plugins/eoding-product-register/docs/plugin-verification.md)
 
-설치 구조는 [OpenAI 공식 플러그인 문서](https://developers.openai.com/plugins/build/plugins)를 따릅니다. MIT 라이선스입니다.
+설치 구조는 [OpenAI 공식 플러그인 문서](https://developers.openai.com/plugins/build/plugins)를 따릅니다. MIT 라이선스이며 저작권자는 주식회사 어딩 (Eoding Inc.)입니다. 사용하는 오픈소스 목록과 라이선스는 [THIRD_PARTY_NOTICES.md](plugins/eoding-product-register/THIRD_PARTY_NOTICES.md)에 있습니다.
