@@ -1,6 +1,11 @@
 # 상품 등록 플러그인 검증 — 2026-10-15
 
-현재 배포 버전: **0.2.6**. 설치 진입점은 `scripts/plugin-start.mjs`, MCP 서버는 `src/plugin-mcp.mjs`이며 도구 18개를 제공합니다. 마켓플레이스는 이 저장소의 `plugins/eoding-product-register`를 설치합니다.
+현재 배포 버전: **0.3.0**. 설치 진입점은 `scripts/plugin-start.mjs`, MCP 서버는 `src/plugin-mcp.mjs`이며 도구 22개를 제공합니다. 마켓플레이스는 이 저장소의 `plugins/eoding-product-register`를 설치합니다.
+
+## 0.3.0 자유여행 등록 확인
+
+- `tests/fit-plan.test.mjs`: 초안 검증(비공개 기본·최저가보장 끔·가격구분 누락·기간 중복·이미지 ID·관광지 미연결·줄바꿈), 참조정보/약관/관광지 payload가 ERP 화면 직렬화와 같은지, 검토·사용자 지시 없이 실행되지 않는지.
+- 실ERP 검증 결과는 PR 설명에 기록합니다.
 
 ## 0.2.6 속도 개선 확인
 

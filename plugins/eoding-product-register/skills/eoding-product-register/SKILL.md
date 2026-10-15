@@ -1,6 +1,6 @@
 ---
 name: eoding-product-register
-description: 상품 링크나 엑셀로 어딩 ERP의 신규 비공개 상품·이미지·상세·전체 일정을 등록한다. 요청한 시즌·요금·왕복 항공과 출발일 1건의 행사까지 같은 로그인으로 저장하고 독립 재조회한다. 전체 세팅 목표는 20분이다.
+description: 상품 링크나 엑셀로 어딩 ERP의 신규 비공개 상품·이미지·상세·전체 일정을 등록한다. 자유여행(투어·티켓·체험·호텔) 상품은 옵션·판매일·참조정보·관광지 콘텐츠 연결 일정·약관까지 등록한다. 요청한 시즌·요금·왕복 항공과 출발일 1건의 행사까지 같은 로그인으로 저장하고 독립 재조회한다. 전체 세팅 목표는 20분이다.
 ---
 
 # 어딩 상품 등록
@@ -18,6 +18,10 @@ description: 상품 링크나 엑셀로 어딩 ERP의 신규 비공개 상품·�
 7. 요청 범위 전체를 `product_import_review`로 내부 검토한다. 사용자가 승인 제출과 등록을 AI에게 명시적으로 맡겼다면 앞선 대화의 위임도 같은 범위에서 유효하다. 반환된 `id/companyId/accountName/planDigest/scopeDigest/scope` 그대로 `product_import_approve`에 전달하고 `delegation:{explicitUserRequest:true,userInstruction:'직접 사용자의 위임 원문'}`을 포함한다. 다시 허락을 묻거나 검토 폼 클릭을 기다리지 않는다. 위임이 없을 때만 사용자 검토 링크를 제공한다. 회사·계정·범위·CSRF·만료·1회 실행 검사는 유지하며 제출 결과가 불명확하면 자동 재제출하지 않는다.
 8. 실행 후 `product_import_get({id,compact:true})`으로 20~30초 간격으로 진행·오류·최종 결과만 확인한다. 원문 근거가 실제로 필요할 때만 `includeSource:true`의 전체 응답을 읽는다. `approval-submitted`는 완료가 아니다. `completed` 또는 `completed-over-budget`와 `result.finalCheck='verified'`, 상품 링크를 확인한다. 행사 요청 시 `result.departure.eventUrl`까지 확인한다.
 9. 마지막 요청까지 완료하면 `product_import_close`로 종료한다. 후속 작업이 남으면 세션을 유지한다. 사용자의 수동 편집을 버릴 수 있으면 먼저 확인한다.
+
+## 자유여행(FIT) 상품
+
+투어·티켓·체험·교통·호텔처럼 출발일 행사 대신 옵션·판매일로 파는 상품은 패키지 흐름을 쓰지 않는다. `product_fit_schema`의 [fit.md](references/fit.md)를 읽고 `product_import_source` → `product_import_images` → `product_import_lookups` → `product_fit_prepare` → `product_fit_review` → (사용자 지시·위임 시) `product_fit_register` → `product_import_get({id,compact:true}).fit`으로 진행한다. 단계(images → places → master → options → sales → reference → schedule → terms → final)가 끝날 때마다 사용자에게 진행을 보여준다. 가격은 원문 그대로(정가/판매가), 상태는 비공개, 최저가보장은 끈다. 참조정보는 사진 중심, 일정 사진은 관광지 콘텐츠 연결로 넣는다. 실패하면 원인을 고친 뒤 같은 검토로 `product_fit_register`를 다시 호출해 이어서 진행한다.
 
 ## 범위와 실패 처리
 
