@@ -1,4 +1,6 @@
-# 어딩 상품등록기 0.4.3
+# 어딩 상품등록기 0.5.0
+
+0.5.0: 패키지 일정에 콘텐츠 카드를 연결합니다. 저장된 패키지 일정표(같은 작업의 검증된 결과 또는 지정한 상품·일정표)의 일차 끝에 관광지·식당·선택관광 카드를 추가하고, 콘텐츠는 기존 번호·같은 종류/도시/이름으로 재사용하거나 없으면 만듭니다. 기존 일정 행·식사·호텔은 바꾸지 않으며 일차마다 일정 상세 JSON으로 독립 재조회하고 마지막에 전체를 다시 확인합니다(`product_day_contents_schema` → `product_day_contents_prepare` → `product_day_contents_review` → `product_day_contents_register`).
 
 0.4.3: 저작권자를 주식회사 어딩 (Eoding Inc.)으로 명시하고 오픈소스 고지(`THIRD_PARTY_NOTICES.md`)를 추가했습니다. 기능 변경은 없습니다.
 
