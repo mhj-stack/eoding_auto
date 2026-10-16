@@ -1,6 +1,6 @@
 # 상품 등록 플러그인 검증 — 2026-10-15
 
-현재 배포 버전: **0.4.3**. 설치 진입점은 `scripts/plugin-start.mjs`, MCP 서버는 `src/plugin-mcp.mjs`이며 도구 26개를 제공합니다. 마켓플레이스는 이 저장소의 `plugins/eoding-product-register`를 설치합니다.
+현재 배포 버전: **0.5.0**. 설치 진입점은 `scripts/plugin-start.mjs`, MCP 서버는 `src/plugin-mcp.mjs`이며 도구 30개를 제공합니다. 마켓플레이스는 이 저장소의 `plugins/eoding-product-register`를 설치합니다.
 
 ## 0.4.2 일정표 속도 개선
 

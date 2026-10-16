@@ -13,7 +13,7 @@ const dataDir = process.env.EODING_DATA_DIR || process.env.PLUGIN_DATA || path.j
 const python = path.join(dataDir, 'python', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
 if (!process.env.EODING_PYTHON && existsSync(python)) process.env.EODING_PYTHON = python;
 const runtime = new ProductImportPlugin({ dataDir, inputDir: process.env.EODING_INPUT_DIR });
-const server = new McpServer({ name: 'eoding-product-register', version: '0.4.3' });
+const server = new McpServer({ name: 'eoding-product-register', version: '0.5.0' });
 const id = z.string().uuid();
 const object = z.record(z.unknown());
 const readonly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
@@ -25,16 +25,17 @@ const safe = fn => async args => {
 };
 const register = (name, description, inputSchema, annotations, handler) => server.registerTool(name, { description, inputSchema, annotations }, safe(handler));
 register('product_import_capabilities', 'Read plugin scope, installation paths and the source → prepare → authorized review → result workflow.', {}, readonly, async () => ({
-  version: '0.4.3', transport: 'stdio', requiresLlmApiKey: false,
-  scope: ['new-private-basic', 'display-images', 'detail-reference-content', 'schedule', 'all-days-meals', 'optional-season-prices-flight', 'optional-single-departure', 'fit-private-product-options-sales-contents', 'erp-contents-place-meal-shopping-optionaltour-meeting'],
+  version: '0.5.0', transport: 'stdio', requiresLlmApiKey: false,
+  scope: ['new-private-basic', 'display-images', 'detail-reference-content', 'schedule', 'all-days-meals', 'optional-season-prices-flight', 'optional-single-departure', 'fit-private-product-options-sales-contents', 'erp-contents-place-meal-shopping-optionaltour-meeting', 'package-day-content-cards'],
   excluded: ['existing-product-overwrite', 'multiple-events', 'hotel-assignment', 'publish', 'sales-channel'],
   requiresUserAuthorization: true, approvalModes: ['human-form', 'explicit-user-delegation'], liveEndToEndVerified: false,
   setupTargetMs: SETUP_TARGET_MS, timingIncludes: ['source-collection', 'AI-coordination', 'user-waits', 'ERP-writes', 'independent-readback'], timingIsGuarantee: false,
-  optimizations: ['flight-duration-preflight', 'bounded-image-batch', 'source-supplement', 'explicit-wait-accounting', 'retained-login-session', 'batched-erp-lookups', 'compact-progress', 'dependency-cache-reuse', 'single-final-product-read', 'bounded-content-review', 'background-content-progress', 'all-skills-runtime-cache', 'condition-based-fit-schedule', 'atomic-package-day-snapshot'],
+  optimizations: ['flight-duration-preflight', 'bounded-image-batch', 'source-supplement', 'explicit-wait-accounting', 'retained-login-session', 'batched-erp-lookups', 'compact-progress', 'dependency-cache-reuse', 'single-final-product-read', 'bounded-content-review', 'background-content-progress', 'all-skills-runtime-cache', 'condition-based-fit-schedule', 'atomic-package-day-snapshot', 'append-only-day-content-cards'],
   inputDir: runtime.inputDir,
   workflow: ['product_import_schema (once per connected version)', 'product_import_context', 'product_import_source', 'product_import_images', 'product_import_lookups', 'product_import_prepare', 'product_import_review', 'product_import_approve (only when explicitly delegated)', 'product_import_get (compact:true)'],
   fitWorkflow: ['product_fit_schema', 'product_import_source', 'product_import_images', 'product_import_lookups', 'product_fit_prepare', 'product_fit_review', 'product_fit_register (user instruction required)', 'product_import_get (compact:true).fit'],
   contentWorkflow: ['product_content_schema', 'product_import_source', 'product_import_images (only photos present in the source)', 'product_import_lookups', 'product_content_prepare', 'product_content_review', 'product_content_register (user instruction required)', 'product_import_get (compact:true).contents'],
+  dayContentsWorkflow: ['product_day_contents_schema', 'package job completed with finalCheck verified (or explicit productId/scheduleId of a saved package schedule)', 'product_day_contents_prepare', 'product_day_contents_review', 'product_day_contents_register (user instruction required)', 'product_import_get (compact:true).dayContents'],
   authorization: { required: true, reuseExplicitUserDelegation: true, separateUserConfirmationWhenDelegated: false },
   notice: 'The connected AI interprets sources and prepares the full scope. If the user already delegated approval submission, review internally and immediately call product_import_approve with that direct human instruction; do not ask again. Never ask users for JSON or approve every day. Installation is not live ERP acceptance.'
 }));
@@ -109,6 +110,19 @@ register('product_content_register', 'Start missing reviewed contents in the bac
   id, companyId: z.string().min(1), accountName: z.string().min(1), planDigest: z.string().regex(/^[a-f0-9]{64}$/),
   delegation: z.object({ explicitUserRequest: z.literal(true), userInstruction: z.string().min(1).max(2000) }).strict()
 }, { ...local, destructiveHint: true, openWorldHint: true }, args => runtime.contentRegister(args));
+register('product_day_contents_schema', 'Read the package day content card format (관광지 place, 식당 meal, 선택관광 optionaltour linked into an existing package schedule day) before preparing it.', {}, readonly, async () => ({
+  instructions: await readFile(new URL('../skills/eoding-product-register/references/day-contents.md', import.meta.url), 'utf8')
+}));
+register('product_day_contents_prepare', 'Validate and persist day content cards for a saved package schedule: existing contents by contentId or exact name+cityLabel, or new ones defined in contents (created only when no exact active record exists). Omit productId/scheduleId to use this job\'s verified package result. Never saves ERP.', {
+  id, dayContents: object
+}, local, args => runtime.dayContentsPrepare(args));
+register('product_day_contents_review', 'Read-only day contents review: read the schedule detail JSON, resolve every referenced content (reuse or create) and existing cards in the logged-in dedicated browser. Returns a Korean per-day summary and planDigest. Never saves ERP.', {
+  id
+}, { ...local, openWorldHint: true }, args => runtime.dayContentsReview(args));
+register('product_day_contents_register', 'Start the reviewed day content cards in the background: create missing contents, append cards after each day\'s last step (existing rows, meals and hotels unchanged), verify each day by an independent readback and finish with a final readback. Requires the review binding and a direct user instruction. Poll product_import_get({id,compact:true}).dayContents. A continuation reconciles the journal first; an unanswered save is never retried automatically.', {
+  id, companyId: z.string().min(1), accountName: z.string().min(1), planDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  delegation: z.object({ explicitUserRequest: z.literal(true), userInstruction: z.string().min(1).max(2000) }).strict()
+}, { ...local, destructiveHint: true, openWorldHint: true }, args => runtime.dayContentsRegister(args));
 register('product_import_get','Read job status, progress and independently verified saved links. Prefer compact:true for polling to omit repeated source/image metadata; includeSource:true remains available for full evidence. Submission is not completion. Uncertain writes require reconciliation, never a new create attempt.', {
   id, includeSource: z.boolean().optional(), compact: z.boolean().optional()
 }, readonly, args => runtime.get(args));
